@@ -14,6 +14,8 @@ export interface HarnessConfig {
   temperature: number | null;
   timeoutMs: number;
   workspaceDir: string;
+  /** "issue": lean fix workflow (spec, build, test, review, attack). "full": the adaptive BMAD workflow. */
+  workflow: "issue" | "full";
 }
 
 export const HARNESS_CONFIG_FILE = "harness.config.json";
@@ -29,6 +31,7 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   temperature: 0,
   timeoutMs: 300000,
   workspaceDir: "workspace",
+  workflow: "issue",
 };
 
 export function loadHarnessConfig(root: string, env: NodeJS.ProcessEnv = process.env): HarnessConfig {
@@ -39,6 +42,8 @@ export function loadHarnessConfig(root: string, env: NodeJS.ProcessEnv = process
   if (pick(env.AI_PROVIDER)) config.provider = pick(env.AI_PROVIDER);
   if (pick(env.AI_MODEL)) config.model = pick(env.AI_MODEL);
   if (pick(env.AI_BASE_URL)) config.baseURL = pick(env.AI_BASE_URL);
+  if (pick(env.HARNESS_WORKFLOW)) config.workflow = pick(env.HARNESS_WORKFLOW) as HarnessConfig["workflow"];
+  if (config.workflow !== "issue" && config.workflow !== "full") throw new Error(`${HARNESS_CONFIG_FILE}: workflow must be "issue" or "full".`);
   if (config.runtime !== "opencode") throw new Error(`${HARNESS_CONFIG_FILE}: runtime must be "opencode".`);
   if (!config.provider || !config.model) throw new Error(`${HARNESS_CONFIG_FILE}: provider and model are required.`);
   if (config.provider === OPENAI_COMPATIBLE && !config.baseURL) {

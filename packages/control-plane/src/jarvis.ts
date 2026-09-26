@@ -129,6 +129,8 @@ export function narrateEvent(event: DomainEvent, mission: Mission): Narration {
     case "SkillStarted":
       return say("INFO", `${skillLabel(str(data.skillId))} started.`);
     case "SkillCompleted":
+      // ForgeClosed announces the forge with its requirement count.
+      if (str(data.skillId) === "bmad-forge-idea") return say("SILENT", "");
       return say("IMPORTANT", `${skillLabel(str(data.skillId))} is complete.`);
     case "SkillFailed":
       return say("WARNING", `${skillLabel(str(data.skillId))} did not complete.`);
@@ -151,8 +153,8 @@ export function narrateEvent(event: DomainEvent, mission: Mission): Narration {
     case "ReviewStarted":
       return say("INFO", `Review of ticket ${ref} started.`);
     case "ReviewCompleted":
-      return data.result === "PASS" ? say("IMPORTANT", "Review passed.") : say("WARNING", `Review is ${str(data.result).toLowerCase() || "incomplete"}.`);
     case "ReviewFailed": {
+      if (data.result === "PASS") return say("IMPORTANT", "Review passed.");
       const count = blockingFindings(mission, ref, "reviews");
       const record = (mission.reviews ?? []).filter((item) => item.ticketRef === ref).at(-1);
       if (data.result === "FAIL") return say("WARNING", count > 0 ? `Review found ${plural(count, "blocking issue")}.` : "Review failed.");

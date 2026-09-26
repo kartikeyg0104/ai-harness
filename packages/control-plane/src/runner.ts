@@ -16,7 +16,8 @@ export const processRunner: CommandRunner = {
   },
   run(command: string, args: string[], cwd: string, timeoutMs: number, env?: Record<string, string>): CommandResult {
     const started = Date.now();
-    const result = spawnSync(command, args, {
+    // A NUL byte cannot cross exec(); drop it rather than fail the whole run.
+    const result = spawnSync(command, args.map((arg) => arg.replace(/\0/g, "")), {
       cwd,
       encoding: "utf8",
       timeout: timeoutMs,

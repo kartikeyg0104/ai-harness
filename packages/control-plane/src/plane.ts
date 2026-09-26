@@ -82,6 +82,7 @@ import type {
 import { LOOP_TRANSITIONS, emptyBrain, emptyContext } from "./types";
 import { CommandModelRunner, redactSecrets } from "./model-runner";
 import { runAutopilot, type AutopilotHooks, type AutopilotResult } from "./autopilot";
+import { detectTestCommand, nonNodeRanTests, type TestCommand } from "./test-command";
 import { PREVIEW_MARKER, previewDir, startPreview, withPreview, type PreviewServer } from "./preview";
 import { PLAN_PROMPT_VERSION, appSource, parsePlan, planPrompt } from "./verification-plan";
 import { extractJson } from "./reviewer";
@@ -187,6 +188,13 @@ export function runnerWrites(transcript: string, root: string): Set<string> | nu
 }
 
 /** A recorded human decision needs something that reads as a name: at least two letters, not just punctuation. */
+/** True when an answer scopes out tests, review, security, or browser checks ("no test coverage", "skip review"). */
+export function excludesVerification(text: string): boolean {
+  return text
+    .split(/[.;,\n]|\band\b|\bor\b/i)
+    .some((clause) => /\b(no|not|without|skip|skipping|exclud\w*|omit\w*)\b/i.test(clause) && /\b(tests?|testing|test coverage|unit tests?|verification|security (checks?|scans?|review)|code review|browser checks?)\b/i.test(clause));
+}
+
 export function namedPerson(identity: string): boolean {
   return (identity.match(/\p{L}/gu) ?? []).length >= 2;
 }
@@ -218,12 +226,16 @@ export class BmadControlPlane {
     ensureHome(root);
   }
 
-  createMission(input: string): Mission {
+  /**
+   * `options.issue` starts a lean issue-fix mission: quick workflow (spec, build, review) and one requirement taken
+   * from the issue, so no forge session and no ticketing skill run is needed before the build.
+   */
+  createMission(input: string, options: { issue?: { title: string; acceptance: string } } = {}): Mission {
     const text = input.trim();
     if (!text) throw new Error("A mission needs an idea.");
     const project = projectHasCode(this.root);
-    const complexity = classifyComplexity(text, { fileCount: project.fileCount });
-    const mode = classifyMode(text, project);
+    const complexity = options.issue ? "simple" : classifyComplexity(text, { fileCount: project.fileCount });
+    const mode = options.issue ? "quick" : classifyMode(text, project);
     const workflow = selectWorkflow(complexity, mode);
     const stamp = this.now().toISOString();
     const mission: Mission = {
@@ -287,6 +299,24 @@ export class BmadControlPlane {
     if (workflow.some((step) => step.skillId === "bmad-forge-idea")) {
       mission.forge = this.openForge(mission, text);
       this.setStep(mission, "bmad-forge-idea", "awaiting-user", "One material question at a time. State persists in the control plane.");
+    }
+    if (options.issue) {
+      mission.requirements = [
+        {
+          id: "REQ-001",
+          title: options.issue.title.slice(0, 120),
+          description: text,
+          priority: "p0",
+          risk: "medium",
+          source: "issue",
+          acceptance_criteria: [options.issue.acceptance],
+          verification_methods: [],
+          dependencies: [],
+          status: "draft",
+          linked_artifacts: [],
+          version: 1,
+        },
+      ];
     }
     this.touch(mission);
     this.emit(mission, "MissionCreated", { input: text, complexity, mode, pin: BMAD_METHOD_PIN.commit });
@@ -352,6 +382,7 @@ export class BmadControlPlane {
       installed ? `Installed upstream skill for method guidance: ${path.join(this.root, installed)}` : "",
       "Keep each answer to one or two concrete sentences that a test could check. Choose the smallest reasonable scope.",
       "The success answer must name an observable check for every capability the idea mentions; do not drop any of them.",
+      "Non-goals limit product features only. Automated tests, review, security checks, and browser verification are always part of delivery; never list them as non-goals.",
       "Do not write any files. Reply with one JSON object and no other text.",
       `Idea: ${mission.input}`,
       "Questions, each with its id:",
@@ -381,6 +412,8 @@ export class BmadControlPlane {
       const found = positional ? proposals[index] : proposals.find((item) => item.id === question.id);
       const text = typeof found?.answer === "string" ? found.answer.trim().slice(0, 600) : "";
       if (!text) continue;
+      // Verification is not the model's to scope out; such an answer stays open for a retry or a person.
+      if (excludesVerification(text)) continue;
       mission.forge.answered.push(question.id);
       mission.forge.locks.push({ kind: "assumption", key: question.id, text, at: this.now().toISOString(), source: "model" });
       this.emit(mission, "ForgeAnswered", { key: question.id, by: "model", command: runnerConfig.command });
@@ -2612,24 +2645,30 @@ export class BmadControlPlane {
 
   private verifyBuiltTicket(mission: Mission, ticket: TicketEntry, cwd: string): TicketExecution["verification"] {
     this.emit(mission, "VerificationStarted", { ticketRef: ticket.ref });
-    const testDir = testPackageDir(cwd, this.listChanged(cwd));
+    const changed = this.listChanged(cwd);
+    const testDir = testPackageDir(cwd, changed);
     const packagePath = path.join(testDir, "package.json");
     const where = path.relative(cwd, testDir);
-    const testCommand = where ? `npm test (in ${where})` : "npm test";
+    const parsedPackage = fs.existsSync(packagePath) ? (JSON.parse(fs.readFileSync(packagePath, "utf8")) as { scripts?: { test?: string } }) : null;
+    const npmScript = parsedPackage?.scripts?.test;
+    // Projects without an npm test script (Python, Go, Rust, make) use their own runner.
+    const plan: TestCommand | null =
+      typeof npmScript === "string" && npmScript.trim()
+        ? { command: "npm", args: ["test"], dir: testDir, label: where ? `npm test (in ${where})` : "npm test" }
+        : detectTestCommand(cwd, changed);
+    const testCommand = plan?.label ?? "npm test";
     let verification: TicketExecution["verification"] = "not-run";
-    if (fs.existsSync(packagePath)) {
-      const parsed = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { scripts?: { test?: string } };
-      const script = parsed.scripts?.test;
-      if (typeof script === "string" && script.trim()) {
+    if (parsedPackage || plan) {
+      if (plan) {
         this.emit(mission, "TestStarted", { ticketRef: ticket.ref, command: testCommand });
         const started = this.now().toISOString();
-        const result = this.runner.run("npm", ["test"], testDir, 120000);
+        const result = this.runner.run(plan.command, plan.args, plan.dir, plan.command === "npm" ? 120000 : 300000);
         const finished = this.now().toISOString();
         const relative = path.join(".bmad-next", "evidence", mission.id, `${ticket.ref}-unit.log`);
         const absolute = path.join(this.root, relative);
         fs.mkdirSync(path.dirname(absolute), { recursive: true });
         fs.writeFileSync(absolute, `${result.stdout}\n${result.stderr}`);
-        const passed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout);
+        const passed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout) && nonNodeRanTests(result.stdout);
         this.recordEvidence(mission.id, {
           requirement_id: ticket.covers[0],
           story_id: ticket.ref,
@@ -3205,7 +3244,13 @@ export class BmadControlPlane {
       const absolute = path.isAbsolute(relative) ? relative : path.join(cwd, relative);
       if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) continue;
       if (tracked.stdout.includes(relative)) continue;
-      parts.push(`diff --git a/${relative} b/${relative}\n--- /dev/null\n+++ b/${relative}\n${fs.readFileSync(absolute, "utf8")}`);
+      const body = fs.statSync(absolute).size > 200_000 ? null : fs.readFileSync(absolute);
+      // Binary or oversized files (compiled caches, images) are named, not inlined: their bytes are not reviewable text.
+      if (!body || body.includes(0)) {
+        parts.push(`diff --git a/${relative} b/${relative}\nBinary or large file ${relative} added`);
+        continue;
+      }
+      parts.push(`diff --git a/${relative} b/${relative}\n--- /dev/null\n+++ b/${relative}\n${body.toString("utf8")}`);
     }
     return redactSecrets(parts.filter((part) => part.trim().length > 0).join("\n"));
   }

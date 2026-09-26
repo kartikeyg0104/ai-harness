@@ -64,6 +64,8 @@ test("real events narrate from mission state, silent events stay silent, and the
   assert.equal(narrateEvent(event("ForgeClosed", { outcome: "hardened" }), mission).text, "Forge is complete. 1 requirement recorded.");
   assert.equal(narrateEvent(event("TicketStarted", { ticketRef: "1.1", agent: "Developer" }), mission).text, "Developer is building ticket 1.1.");
   assert.equal(narrateEvent(event("RepairStarted", { ticketRef: "1.1" }), mission).category, "IMPORTANT");
+  assert.equal(narrateEvent(event("ReviewCompleted", { ticketRef: "1.1", result: "FAIL" }), mission).text, "Review failed.");
+  assert.equal(narrateEvent(event("ReviewCompleted", { ticketRef: "1.1", result: "PASS" }), mission).text, "Review passed.");
   const silent = narrateEvent(event("WorktreeReleased", { ticketRef: "1.1" }), mission);
   assert.equal(silent.category, "SILENT");
   assert.equal(shouldSpeak("SILENT", "all"), false);

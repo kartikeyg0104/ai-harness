@@ -174,12 +174,20 @@ export class OpenCodeAdapter implements AgentRuntime {
     const timeout = positiveTimeout(process.env.BMAD_RUNNER_TIMEOUT, 180000);
     const args = ["run", "--pure", "--auto", "--format", "json", "--dir", context.cwd];
     if (model) args.push("--model", model);
-    args.push(
+    const tracked = this.runner.run("git", ["ls-files"], context.cwd, 10000);
+    const existingProject = tracked.exitCode === 0 && tracked.stdout.split("\n").filter((line) => line.trim()).length > 3;
+    if (existingProject) {
+      args.push(
+        `${context.prompt}\n\nWork only in ${context.cwd}. This is an existing repository. Read the code the ticket touches first, then make the smallest change that resolves it and follow the project's conventions. Add or update tests with the project's existing test framework (for example pytest for Python or the package's own npm test script). Do not add a package.json or change the build system unless the ticket asks for it. Put this exact marker as a comment on its own line in one changed source file, using that language's comment syntax (for example # BMAD-TICKET-STATUS: built in Python, // BMAD-TICKET-STATUS: built in JavaScript); the harness removes it from the final patch. Do not keep exploring after the change and its tests exist. A chat reply is not completion.`,
+      );
+    } else args.push(
       `${context.prompt}\n\nWork only in ${context.cwd}. Write the implementation files and, when the ticket asks for tests, the tests and the package.json that runs them; then stop. If this ticket is a web application, ship a page the browser can open: index.html plus the JavaScript it needs for add, complete, delete, and localStorage persistence. A Node-only module without index.html is not a web app. Put this exact marker in one implementation source file where the program still parses (a // comment in JavaScript, or <!-- BMAD-TICKET-STATUS: built --> in HTML):\n// BMAD-TICKET-STATUS: built\nIf you add a test, use node:test and node:assert/strict and cover add, complete, delete, plus persistence or reload. Do not import expect, beforeAll, or afterAll. Do not keep exploring after the files exist. A chat reply is not completion.`,
     );
-    let result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: openCodeStepBound() });
+    // An existing repository needs more steps to read the code before the change.
+    const bound = openCodeStepBound(existingProject ? 40 : 20);
+    let result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: bound });
     if (result.exitCode !== 0 && /database is locked/i.test(result.stderr)) {
-      result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: openCodeStepBound() });
+      result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: bound });
     }
     const classified = classifyOpenCodeRun({ exitCode: result.exitCode, stdout: result.stdout, timedOut: result.timedOut });
     const listed = this.runner.run("git", ["status", "--short", "--untracked-files=all"], context.cwd, 10000);

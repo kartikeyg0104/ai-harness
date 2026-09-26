@@ -20,6 +20,10 @@ const ISSUE_REF = /^([\w.-]+)\/([\w.-]+)#(\d+)$/;
 const REPO_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/;
 const MAX_TEXT = 20000;
 const MAX_ROUNDS = 6;
+const ISSUE_ACCEPTANCE = "The behaviour the issue describes is fixed or implemented, and automated tests that cover it pass.";
+/** Completion marker the build prompt asks for; it is removed from the delivered patch. */
+const MARKER_LINE = /^[ \t]*(?:\/\/|#|--|;|<!--|\/\*)[ \t]*BMAD-TICKET-STATUS:[ \t]*built[ \t]*(?:-->|\*\/)?[ \t]*\r?\n?/gm;
+const MARKER_TAIL = /[ \t]*(?:\/\/|#|<!--|\/\*)[ \t]*BMAD-TICKET-STATUS:[ \t]*built[ \t]*(?:-->|\*\/)?/g;
 
 interface Task {
   title: string;
@@ -34,6 +38,8 @@ interface Session {
   repo: string;
   lines: Lines | null;
   stop: boolean;
+  /** PATH at launch; each task starts from it so one task's virtual environment does not leak into the next. */
+  basePath: string;
 }
 
 /** Line queue over readline so pasted multi-line text is never dropped between prompts. */
@@ -86,6 +92,8 @@ function stamp(): string {
 
 /** Commits made by the harness itself need an identity even on a machine with no git config. */
 function ensureGitIdentity(): void {
+  // Compiled caches would otherwise show up as changes in every Python ticket worktree.
+  process.env.PYTHONDONTWRITEBYTECODE ||= "1";
   process.env.GIT_AUTHOR_NAME ||= "AI Harness";
   process.env.GIT_AUTHOR_EMAIL ||= "ai-harness@example.invalid";
   process.env.GIT_COMMITTER_NAME ||= process.env.GIT_AUTHOR_NAME;
@@ -210,6 +218,43 @@ async function resolveTask(session: Session, raw: string): Promise<Task> {
   return { title: text.split("\n")[0].slice(0, 100), input: clip(text), workspace: targetForText(session) };
 }
 
+const PYTHON_MARKERS = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "pytest.ini", "tox.ini"];
+
+/**
+ * A Python repository gets its own virtual environment (outside the repository) with pytest and, best effort, the
+ * project and its requirements installed. It goes first on PATH so the test gate and the coding agent use it.
+ */
+function preparePython(session: Session, workspace: string): void {
+  process.env.PATH = session.basePath;
+  delete process.env.VIRTUAL_ENV;
+  if (!PYTHON_MARKERS.some((name) => fs.existsSync(path.join(workspace, name)))) return;
+  const venv = path.join(workspaceRoot(session), ".venvs", path.basename(workspace));
+  const python = path.join(venv, "bin", "python");
+  const run = (command: string, args: string[], timeout: number) =>
+    spawnSync(command, args, { cwd: workspace, encoding: "utf8", timeout, env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" } });
+  if (!fs.existsSync(python)) {
+    say(`Python project: creating ${venv}`);
+    const created = run("python3", ["-m", "venv", venv], 120000);
+    if (created.status !== 0) {
+      say(`  Could not create a virtual environment; tests use the system python3.\n  ${(created.stderr ?? "").trim().split("\n").at(-1) ?? ""}`);
+      return;
+    }
+    const steps: Array<[string, string[]]> = [["pytest", ["install", "-q", "pytest"]]];
+    for (const file of ["requirements.txt", "requirements-dev.txt", "requirements-test.txt", "test-requirements.txt"]) {
+      if (fs.existsSync(path.join(workspace, file))) steps.push([file, ["install", "-q", "-r", file]]);
+    }
+    if (fs.existsSync(path.join(workspace, "pyproject.toml")) || fs.existsSync(path.join(workspace, "setup.py"))) {
+      steps.push(["the project", ["install", "-q", "-e", "."]]);
+    }
+    for (const [label, args] of steps) {
+      const installed = run(python, ["-m", "pip", ...args], 600000);
+      say(`  install ${label}: ${installed.status === 0 ? "ok" : "failed (continuing)"}`);
+    }
+  }
+  process.env.VIRTUAL_ENV = venv;
+  process.env.PATH = `${path.join(venv, "bin")}${path.delimiter}${process.env.PATH ?? ""}`;
+}
+
 async function ask(session: Session, prompt: string, fallback: string): Promise<string> {
   if (session.auto || !session.lines) {
     say(`${prompt} -> ${fallback || "(skipped)"} [auto]`);
@@ -253,6 +298,18 @@ async function drive(session: Session, plane: BmadControlPlane, missionId: strin
   return result as AutopilotResult;
 }
 
+/** Removes the build completion marker from every changed file, so the patch carries only the real change. */
+function stripMarkers(worktree: string): void {
+  const status = git(worktree, ["status", "--porcelain", "--untracked-files=all"]);
+  for (const line of status.out.split("\n")) {
+    const file = path.join(worktree, line.slice(3).trim());
+    if (!line.trim() || !fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+    const text = fs.readFileSync(file, "utf8");
+    if (!text.includes("BMAD-TICKET-STATUS")) continue;
+    fs.writeFileSync(file, text.replace(MARKER_LINE, "").replace(MARKER_TAIL, ""));
+  }
+}
+
 /** Writes each ticket worktree's change as a patch, through a throwaway index so the worktree is untouched. */
 function exportResults(plane: BmadControlPlane, missionId: string, outDir: string): string[] {
   fs.mkdirSync(outDir, { recursive: true });
@@ -260,6 +317,7 @@ function exportResults(plane: BmadControlPlane, missionId: string, outDir: strin
   for (const execution of plane.mission(missionId).executions ?? []) {
     const worktree = execution.worktree;
     if (!worktree || !fs.existsSync(worktree)) continue;
+    stripMarkers(worktree);
     const index = path.join(os.tmpdir(), `ai-harness-index-${process.pid}-${Date.now()}`);
     const env = { ...process.env, GIT_INDEX_FILE: index };
     git(worktree, ["read-tree", "HEAD"], env);
@@ -279,11 +337,22 @@ function exportResults(plane: BmadControlPlane, missionId: string, outDir: strin
 async function runTask(session: Session, raw: string): Promise<AutopilotResult | null> {
   const task = await resolveTask(session, raw);
   say(`\n=== ${task.title}\nWorkspace: ${task.workspace}`);
+  preparePython(session, task.workspace);
   const plane = new BmadControlPlane(task.workspace);
-  const mission = plane.createMission(task.input);
+  const mission =
+    session.config.workflow === "issue"
+      ? plane.createMission(task.input, { issue: { title: task.title, acceptance: ISSUE_ACCEPTANCE } })
+      : plane.createMission(task.input);
   say(`Mission ${mission.id} (complexity ${mission.complexity}, mode ${mission.mode})`);
   session.stop = false;
-  const result = await drive(session, plane, mission.id);
+  let result: AutopilotResult;
+  try {
+    result = await drive(session, plane, mission.id);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
+    say(`Autopilot error: ${reason}`);
+    result = { status: "blocked", missionId: mission.id, reason: `Autopilot error: ${reason}`, steps: [] };
+  }
   const outDir = path.join(workspaceRoot(session), "results", mission.id);
   const patches = exportResults(plane, mission.id, outDir);
   fs.writeFileSync(
@@ -335,6 +404,7 @@ export async function harnessCommand(args: string[]): Promise<void> {
     repo: (process.env.HARNESS_REPO ?? "").trim(),
     lines: null,
     stop: false,
+    basePath: process.env.PATH ?? "",
   };
   banner(session);
 
