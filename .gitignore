@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.tmp/
+.bmad-next/
+_bmad-output/
+.DS_Store
+*.vsix
+.vscode-test/

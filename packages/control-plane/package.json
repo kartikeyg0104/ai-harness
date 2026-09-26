@@ -1,0 +1,17 @@
+{
+  "name": "@bmad-next/control-plane",
+  "version": "0.1.0",
+  "description": "BMAD Next control plane: missions, ticket tree, evidence, and fail-closed gates.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}

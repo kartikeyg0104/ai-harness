@@ -1,0 +1,6 @@
+rules:
+  - id: bmad-hardcoded-secret
+    message: Possible hardcoded secret
+    languages: [generic]
+    severity: ERROR
+    pattern-regex: "(?i)(api[_-]?key|secret|password)\\s*[:=]\\s*['\\\"][^'\\\"]{8,}['\\\"]"

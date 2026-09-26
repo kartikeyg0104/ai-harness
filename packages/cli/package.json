@@ -1,0 +1,19 @@
+{
+  "name": "@bmad-next/cli",
+  "version": "0.1.0",
+  "description": "BMAD Next command line.",
+  "license": "MIT",
+  "bin": {
+    "bmad-next": "dist/main.js"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bmad-next/control-plane": "0.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

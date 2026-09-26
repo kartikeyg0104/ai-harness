@@ -1,0 +1,33 @@
+import { spawnSync } from "node:child_process";
+import type { CommandResult, CommandRunner } from "./types";
+
+function timedOut(error: Error | undefined): boolean {
+  if (!error) return false;
+  const coded = error as Error & { code?: string };
+  return coded.code === "ETIMEDOUT" || /ETIMEDOUT|timed out/i.test(error.message);
+}
+
+export const processRunner: CommandRunner = {
+  which(bin: string): string | null {
+    const result = spawnSync("which", [bin], { encoding: "utf8" });
+    if (result.status !== 0) return null;
+    return result.stdout.trim() || null;
+  },
+  run(command: string, args: string[], cwd: string, timeoutMs: number, env?: Record<string, string>): CommandResult {
+    const started = Date.now();
+    const result = spawnSync(command, args, {
+      cwd,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      killSignal: "SIGTERM",
+      env: env ? { ...process.env, ...env } : process.env,
+    });
+    return {
+      exitCode: result.status,
+      stdout: result.stdout ?? "",
+      stderr: `${result.stderr ?? ""}${result.error ? `\n${result.error.message}` : ""}`,
+      durationMs: Date.now() - started,
+      timedOut: timedOut(result.error),
+    };
+  },
+};

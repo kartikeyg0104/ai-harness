@@ -1,0 +1,76 @@
+{
+  "name": "bmad-next-vscode",
+  "displayName": "BMAD Next",
+  "description": "BMAD control plane inside Code - OSS: missions, ticket tree, evidence, and fail-closed release.",
+  "version": "0.1.0",
+  "publisher": "bmad-next",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": ["Other", "Testing"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bmad-next/control-plane": "0.1.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bmad-next",
+          "title": "BMAD Next",
+          "icon": "media/bmad.svg"
+        }
+      ]
+    },
+    "views": {
+      "bmad-next": [
+        { "type": "webview", "id": "bmad-next.missionControl", "name": "Mission" },
+        { "id": "bmad-next.requirements", "name": "Requirements" },
+        { "id": "bmad-next.tickets", "name": "Stories" },
+        { "id": "bmad-next.evidence", "name": "Evidence" },
+        { "id": "bmad-next.findings", "name": "Findings" },
+        { "id": "bmad-next.agents", "name": "Agents" },
+        { "id": "bmad-next.release", "name": "Release" },
+        { "id": "bmad-next.brain", "name": "Project Brain" }
+      ]
+    },
+    "commands": [
+      { "command": "bmad-next.mission", "title": "BMAD: New Mission" },
+      { "command": "bmad-next.forgeAnswer", "title": "BMAD: Answer Forge Question" },
+      { "command": "bmad-next.harden", "title": "BMAD: Harden Forge" },
+      { "command": "bmad-next.acceptTickets", "title": "BMAD: Accept Ticket Tree" },
+      { "command": "bmad-next.next", "title": "BMAD: What Should I Do Next?" },
+      { "command": "bmad-next.release", "title": "BMAD: Run Release Gate" },
+      { "command": "bmad-next.doctor", "title": "BMAD Next: Doctor" },
+      { "command": "bmad-next.repair", "title": "BMAD: Fix with BMAD" },
+      { "command": "bmad-next.refresh", "title": "BMAD: Refresh" }
+    ],
+    "chatParticipants": [
+      {
+        "id": "bmad.next",
+        "name": "bmad",
+        "description": "BMAD Next control plane",
+        "isSticky": true,
+        "commands": [
+          { "name": "next", "description": "Recommend the next BMAD action" },
+          { "name": "doctor", "description": "Check the local BMAD Next environment" },
+          { "name": "release", "description": "Run the fail-closed release gate" }
+        ]
+      }
+    ],
+    "languageModelTools": [
+      { "name": "bmad_get_mission", "displayName": "Get mission", "modelDescription": "Read the active BMAD Next mission summary.", "toolReferenceName": "bmadGetMission", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": {} } },
+      { "name": "bmad_get_requirement", "displayName": "Get requirement", "modelDescription": "Read one requirement and its proof graph.", "toolReferenceName": "bmadGetRequirement", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
+      { "name": "bmad_run_release_gate", "displayName": "Run release gate", "modelDescription": "Evaluate the release gate. Missing evidence is blocked.", "toolReferenceName": "bmadRunReleaseGate", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": {} } },
+      { "name": "bmad_check_drift", "displayName": "Check drift", "modelDescription": "Cross-check declared architecture and requirements against supplied file text.", "toolReferenceName": "bmadCheckDrift", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": {} } },
+      { "name": "bmad_get_story", "displayName": "Get story", "modelDescription": "Read one ticket and its plan status.", "toolReferenceName": "bmadGetStory", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": { "ref": { "type": "string" } }, "required": ["ref"] } },
+      { "name": "bmad_search_memory", "displayName": "Search memory", "modelDescription": "Search project brain entries recorded for the active mission.", "toolReferenceName": "bmadSearchMemory", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] } },
+      { "name": "bmad_run_security", "displayName": "Run security", "modelDescription": "Run the configured security scanners against the ticket worktree.", "toolReferenceName": "bmadRunSecurity", "canBeReferencedInPrompt": true, "inputSchema": { "type": "object", "properties": { "ticket": { "type": "string" } } } }
+    ]
+  }
+}

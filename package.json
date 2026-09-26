@@ -1,0 +1,23 @@
+{
+  "name": "bmad-next",
+  "private": true,
+  "version": "0.1.0",
+  "description": "BMAD Next — a Code - OSS-native control plane for the BMAD method.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @bmad-next/control-plane && npm run build -w @bmad-next/cli && npm run build -w bmad-next-vscode",
+    "test": "npm run build -w @bmad-next/control-plane && node --test packages/control-plane/dist/test/**/*.js",
+    "bmad-next": "node packages/cli/dist/main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/vscode": "^1.99.0",
+    "typescript": "^5.8.3"
+  }
+}
