@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { baselineDiagnosis, BmadControlPlane, testPackageDir } from "../plane";
+import { repositoryMap, ticketKeywords } from "../repo-map";
 import { buildPackages, describeNpmTests, detectTestCommand, nonNodeRanTests, npmLockRoot, npmTestPackages, npmTestPlan } from "../test-command";
 
 function tempDir(prefix: string): string {
@@ -266,4 +267,39 @@ test("a planning step that answers but misses its contract still reports did not
   const result = await plane.autopilot(mission.id, { log: () => undefined });
   assert.equal(result.status, "blocked");
   assert.match(result.reason, /bmad-spec did not complete/);
+});
+
+test("the build prompt of an existing repository names the files related to the ticket", () => {
+  const root = tempDir("ai-harness-map-");
+  const files: Record<string, string> = {
+    "app/server/src/modules/workflows/workflow.controller.ts": "export async function getWorkflow() {}\n",
+    "app/server/src/modules/workflows/workflow.route.ts": "router.get('/workflows/:id', getWorkflow);\n",
+    "app/server/src/modules/auth/auth.controller.ts": "export async function signIn() {}\n",
+    "app/server/tests/workflows/workflows.test.ts": "describe('workflows', () => {});\n",
+    "app/web/components/dashboard/WorkflowTable.tsx": "export function WorkflowTable() { return null; }\n",
+    "app/web/public/hero.png": "binary",
+    "package-lock.json": "{\"workflow\": true}",
+    "README.md": "AsyncNode\n",
+  };
+  for (const [file, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), text);
+  }
+  const map = repositoryMap(root, Object.keys(files), "[FEATURE]: Add Workflow Duplication Backend/Frontend Easy", "Copy the workflow's node structure into a new workflow.") ?? "";
+  assert.match(map, /- app\/server\/src\/modules\/workflows\/workflow\.controller\.ts/);
+  assert.match(map, /- app\/web\/components\/dashboard\/WorkflowTable\.tsx/);
+  assert.match(map, /Related tests:\n- app\/server\/tests\/workflows\/workflows\.test\.ts/);
+  assert.doesNotMatch(map, /auth\.controller|hero\.png|package-lock/);
+  assert.match(map, /grep -rlni "workflow"/);
+  assert.match(map, /glob tool matches file names only/);
+  assert.ok(ticketKeywords("devclub-nstru/Async_node#26 Add Workflow Duplication", "", ["devclub-nstru", "Async_node"]).has("duplic"), "duplication, duplicate, duplicated share a stem");
+  assert.equal(repositoryMap(root, Object.keys(files), "Improve performance", ""), null, "no related file, no map");
+  const git = (...args: string[]) => childProcess.execFileSync("git", args, { cwd: root, stdio: "pipe" });
+  git("init", "-q");
+  git("add", "-A");
+  const plane = new BmadControlPlane(root);
+  const ticketMap = (plane as unknown as { ticketMap(ticket: { title: string; description: string }, worktree: string): string | null }).ticketMap.bind(plane);
+  const fromTicket = ticketMap({ title: "devclub-nstru/Async_node#26 [FEATURE]: Add Workflow Duplication", description: "" }, root) ?? "";
+  assert.match(fromTicket, /workflow\.controller\.ts/);
+  assert.doesNotMatch(fromTicket, /grep -rlni "(devclub|nstru|async)/, "the owner/repo reference is not a keyword");
 });

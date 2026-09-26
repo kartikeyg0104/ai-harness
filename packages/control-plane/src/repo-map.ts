@@ -16,7 +16,7 @@ export function ticketKeywords(title: string, description: string, exclude: stri
     for (const word of text.toLowerCase().match(/[a-z][a-z0-9]{3,}/g) ?? []) {
       if (STOP.has(word) || excluded.has(word)) continue;
       // A short stem matches the word's other forms: duplication, duplicate, duplicated.
-      const stem = word.length >= 8 ? word.slice(0, Math.max(6, word.length - 4)) : word.replace(/(ing|ed|es|s)$/, "") || word;
+      const stem = word.length >= 8 ? word.slice(0, 6) : word.replace(/(ing|ed|es|s)$/, "") || word;
       if (stem.length < 4) continue;
       weights.set(stem, Math.min((weights.get(stem) ?? 0) + weight, 6));
       if (!words.has(stem)) words.set(stem, word);

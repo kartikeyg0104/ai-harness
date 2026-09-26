@@ -196,6 +196,9 @@ export class BmadRunner {
     const outputPath = path.join(".bmad-next", "missions", missionId, "artifacts", `${skillId}.md`);
     this.writeArtifact(outputPath, result.stdout);
     const status = toRunStatus(validation.status);
+    // The runner's own error is the only record of why it exited non-zero; keep it with the run.
+    const stderr = redactSecrets(result.stderr.replace(/\u001b\[[0-9;]*m/g, "")).trim().slice(-4000);
+    const cause = status === "completed" ? "" : (stderr.split("\n").reverse().find((line) => /error/i.test(line)) ?? stderr.split("\n").at(-1) ?? "").trim().slice(0, 300);
     const provenancePath = path.join(".bmad-next", "missions", missionId, "artifacts", `${skillId}.provenance.json`);
     const named = status === "completed" ? (validation.files[0] ?? outputPath) : outputPath;
     this.writeArtifact(provenancePath, JSON.stringify({
@@ -216,13 +219,14 @@ export class BmadRunner {
       outputPath: named,
       artifactPaths: status === "completed" ? validation.files : [],
       status,
+      ...(status === "completed" || !stderr ? {} : { stderr }),
     }, null, 2));
     return {
       status,
       exitCode: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
-      reason: validation.reason,
+      reason: cause && validation.reason ? `${validation.reason} ${cause}` : validation.reason,
       artifactPath: status === "completed" ? (validation.files[0] ?? path.join(this.root, outputPath)) : undefined,
       durationMs: result.durationMs,
     };

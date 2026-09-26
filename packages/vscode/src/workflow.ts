@@ -290,7 +290,11 @@ async function autopilot(host: WorkflowHost): Promise<void> {
       host.refresh();
       void vscode.window.showInformationMessage(`Every automated gate passed for ${mission.id}. Approve the release in Mission Control.`);
       const approved = await waitFor(host, () => host.plane().mission(mission.id).approvals.some((item) => item.category === "release" && item.decision === "approved"));
-      if (approved) await operate(host, "Release gate", "releaseGate", [mission.id], (result) => summarize(result));
+      if (approved) {
+        // The release gate runs as its own operation, which refuses to start while the autopilot holds the lock.
+        busy = null;
+        await operate(host, "Release gate", "releaseGate", [mission.id], (result) => summarize(result));
+      }
       return;
     }
     if (outcome.status === "released") void vscode.window.showInformationMessage(`BMAD released ${mission.id}.`);

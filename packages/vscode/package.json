@@ -29,15 +29,15 @@
     },
     "views": {
       "bmad-next": [
-        { "type": "webview", "id": "bmad-next.jarvis", "name": "Jarvis" },
-        { "type": "webview", "id": "bmad-next.missionControl", "name": "Mission" },
-        { "id": "bmad-next.requirements", "name": "Requirements" },
-        { "id": "bmad-next.tickets", "name": "Stories" },
-        { "id": "bmad-next.evidence", "name": "Evidence" },
-        { "id": "bmad-next.findings", "name": "Findings" },
-        { "id": "bmad-next.agents", "name": "Agents" },
-        { "id": "bmad-next.release", "name": "Release" },
-        { "id": "bmad-next.brain", "name": "Project Brain" }
+        { "type": "webview", "id": "bmad-next.jarvis", "name": "Jarvis", "initialSize": 1 },
+        { "type": "webview", "id": "bmad-next.missionControl", "name": "Mission", "initialSize": 4 },
+        { "id": "bmad-next.requirements", "name": "Requirements", "visibility": "collapsed" },
+        { "id": "bmad-next.tickets", "name": "Stories", "visibility": "collapsed" },
+        { "id": "bmad-next.evidence", "name": "Evidence", "visibility": "collapsed" },
+        { "id": "bmad-next.findings", "name": "Findings", "visibility": "collapsed" },
+        { "id": "bmad-next.agents", "name": "Agents", "visibility": "collapsed" },
+        { "id": "bmad-next.release", "name": "Release", "visibility": "collapsed" },
+        { "id": "bmad-next.brain", "name": "Project Brain", "visibility": "collapsed" }
       ]
     },
     "commands": [

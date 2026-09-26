@@ -17,6 +17,12 @@ test("a test command that reports zero tests did not run a test", () => {
   assert.equal(testCommandRanTests("ℹ tests 0\nℹ pass 0\n"), false);
   assert.equal(testCommandRanTests("# tests 0\n# pass 0\n"), false);
   assert.equal(testCommandRanTests("ℹ tests 1\nℹ pass 1\n"), true);
+  // A plain `node file` script that only prints is not a test run; the same script running node:test is.
+  assert.equal(testCommandRanTests("> todo-app@1.0.0 test\n> node test.mjs\n\nTodo app implementation complete and verified\n"), false);
+  assert.equal(testCommandRanTests("> todo-app@1.0.0 test\n> node test.mjs\n\n✔ adds a todo\nℹ tests 4\nℹ pass 4\n"), true);
+  assert.equal(testCommandRanTests("> app@1.0.0 test\n> node --test\n\nℹ tests 2\n"), true);
+  // Runners started through node flags report on their own terms; the rule is only for a bare script file.
+  assert.equal(testCommandRanTests("> server test\n> node --experimental-vm-modules ../../node_modules/.bin/jest\n"), true);
 });
 
 function tempProject(): string {

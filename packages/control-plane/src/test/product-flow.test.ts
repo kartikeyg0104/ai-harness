@@ -471,6 +471,33 @@ test("architecture verification reads a nested layer's package.json for declared
   assert.ok(forbidden.violations.some((item) => item.code === "FORBIDDEN_DEPENDENCY"));
 });
 
+test("a plain HTML, CSS, and JavaScript app satisfies its declared technologies, including a browser API it calls", async () => {
+  const { verifyArchitectureTree } = await import("../architecture-check");
+  const root = tempProject();
+  fs.writeFileSync(path.join(root, "index.html"), "<ul id=\"list\"></ul><script src=\"app.js\"></script>");
+  fs.writeFileSync(path.join(root, "styles.css"), "li { color: red; }");
+  fs.writeFileSync(path.join(root, "app.js"), "const saved = localStorage.getItem('todos');");
+  const technology = (choice: string) => ({ id: choice, kind: "technology", choice, alternatives: [] });
+  const declared = ["html", "css", "javascript", "localStorage"].map(technology);
+  const result = verifyArchitectureTree({ root, declared, timestamp: "t" });
+  assert.equal(result.status, "PASS", JSON.stringify(result.violations));
+  // A technology the code never names is still missing.
+  const missing = verifyArchitectureTree({ root, declared: [...declared, technology("IndexedDB")], timestamp: "t" });
+  assert.deepEqual(missing.violations.map((item) => item.message), ["Declared technology IndexedDB was not detected."]);
+});
+
+test("a worker that is not a browser run can load the browser runner without it starting a scenario", async () => {
+  const { Worker } = await import("node:worker_threads");
+  const runner = path.join(__dirname, "..", "browser-runner.js");
+  // The editor runs the control plane in a worker whose data is a plane job, not a browser scenario.
+  const worker = new Worker(`require(${JSON.stringify(runner)})`, { eval: true, workerData: { root: "/repo", method: "autopilot", args: ["m"] } });
+  const errors: string[] = [];
+  worker.on("error", (error) => errors.push(error.message));
+  const code = await new Promise<number>((resolve) => worker.once("exit", resolve));
+  assert.deepEqual(errors, []);
+  assert.equal(code, 0);
+});
+
 test("tickets route to building agents by real words, and human decisions need a name", async () => {
   const { routeAgent, DEFAULT_AGENTS } = await import("../collaboration");
   const builders = DEFAULT_AGENTS.filter((agent) => agent.skills.includes("bmad-build"));
@@ -504,12 +531,27 @@ test("forge answers numbered 1..n map to the open questions in order; partial nu
   assert.ok(prompt);
 });
 
+test("a long idea becomes a title cut at a word, marked with an ellipsis", async () => {
+  const { shortTitle } = await import("../plane");
+  const idea = "A todo app in plain HTML and CSS with a little JavaScript: add a todo, mark it complete, delete it, and keep the list in localStorage so it survives a reload.";
+  const title = shortTitle(idea);
+  assert.ok(title.length <= 120);
+  assert.ok(title.endsWith("…"));
+  assert.ok(idea.startsWith(title.slice(0, -1)));
+  // The cut lands between words: the next character of the idea is a space or punctuation.
+  assert.match(idea[title.length - 1] ?? "", /[\s,;:.]/);
+  assert.equal(shortTitle("Short idea\nwith details on the next line"), "Short idea");
+});
+
 test("stray-write attribution uses the runner's tool log, so a person's edits during a skill run do not block it", async () => {
   const { runnerWrites } = await import("../plane");
   const root = "/repo";
   const log = "\u001b[0m> build · model\n\u001b[0m✱ \u001b[0mGlob \"x\"\n\u001b[0m← \u001b[0mWrite _bmad-output/specs/m/SPEC.md\nWrote file successfully.\n\u001b[0m← \u001b[0mEdit /repo/todo-app/index.html\n";
   assert.deepEqual([...(runnerWrites(log, root) ?? [])], ["_bmad-output/specs/m/SPEC.md", "todo-app/index.html"]);
   assert.equal(runnerWrites("plain stdout without a tool log", root), null);
+  // A file named "..." sits in the root and is the skill's write; "../x" and "/elsewhere/x" leave the root.
+  const dotted = "← Write ...\n← Write ./..notes\n← Write ../outside.md\n← Edit /elsewhere/x.md\n";
+  assert.deepEqual([...(runnerWrites(dotted, root) ?? [])], ["...", "..notes"]);
   const repo = tempProject();
   require("node:child_process").spawnSync("git", ["init", "-q"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "notes.md"), "mine");

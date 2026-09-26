@@ -163,7 +163,7 @@ function page(nonce: string): string {
       if (event.key === "Enter" && cmd.value.trim()) { post({ type: "text", text: cmd.value.trim() }); draft = ""; cmd.value = ""; }
     };
     // Focus the command box when Jarvis comes online, and keep it while typing across live updates.
-    if (document.activeElement !== cmd && (window.__focusCmd || window.__justActivated)) cmd.focus();
+    if (document.activeElement !== cmd && (window.__focusCmd || window.__justActivated)) cmd.focus({ preventScroll: true });
     window.__justActivated = false;
   }
 

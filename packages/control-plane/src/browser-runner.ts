@@ -55,8 +55,14 @@ async function main(): Promise<void> {
   process.exit(result.status === "PASS" ? 0 : result.status === "TIMEOUT" ? 2 : 1);
 }
 
-if (!isMainThread && parentPort) {
-  const payload = workerData as Payload;
+/** A worker started for a browser scenario. Other workers load this module too (the editor's control-plane worker). */
+function isBrowserPayload(data: unknown): data is Payload {
+  const scenario = (data as { scenario?: { id?: unknown } } | null)?.scenario;
+  return typeof scenario === "object" && scenario !== null && typeof scenario.id === "string";
+}
+
+if (!isMainThread && parentPort && isBrowserPayload(workerData)) {
+  const payload = workerData;
   void executeBrowserScenario(payload, new Date().toISOString())
     .then((result) => {
       publish(payload, result);

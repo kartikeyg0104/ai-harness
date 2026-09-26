@@ -48,8 +48,32 @@ function technologiesOf(files: string[], dependencies: string[], root: string): 
   if (fs.existsSync(path.join(root, "package.json")) || files.some((file) => file.endsWith(".js") || file.endsWith(".mjs") || file.endsWith(".cjs"))) found.add("node");
   if (files.some((file) => file.endsWith(".ts") || file.endsWith(".tsx"))) found.add("typescript");
   if (files.some((file) => file.endsWith(".py"))) found.add("python");
+  if (files.some((file) => /\.html?$/.test(file))) found.add("html");
+  if (files.some((file) => /\.(?:css|scss|sass|less)$/.test(file))) found.add("css");
+  if (files.some((file) => /\.(?:m|c)?jsx?$/.test(file))) found.add("javascript");
   for (const dependency of dependencies) found.add(dependency.toLowerCase());
   return [...found];
+}
+
+const SOURCE_FILE = /\.(?:[mc]?[jt]sx?|html?|css|scss|vue|svelte|py)$/;
+
+/** Declared technologies the source code names, such as a browser API (localStorage) that no manifest lists. */
+function technologiesInSource(names: string[], files: string[], root: string): string[] {
+  const pending = new Map(names.map((name) => [name.toLowerCase(), new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i")]));
+  const found: string[] = [];
+  for (const file of files.filter((item) => SOURCE_FILE.test(item)).slice(0, 400)) {
+    if (pending.size === 0) break;
+    const absolute = path.join(root, file);
+    if (fs.statSync(absolute).size > 512 * 1024) continue;
+    const text = fs.readFileSync(absolute, "utf8");
+    for (const [name, pattern] of pending) {
+      if (pattern.test(text)) {
+        found.push(name);
+        pending.delete(name);
+      }
+    }
+  }
+  return found;
 }
 
 export function verifyArchitectureTree(input: { root: string; declared: ArchitectureDecision[]; timestamp: string }): ArchitectureVerification {
@@ -61,6 +85,8 @@ export function verifyArchitectureTree(input: { root: string; declared: Architec
   const detectedTechnologies = technologiesOf(files, dependencies, input.root);
   const declaredComponents = input.declared.filter((item) => item.kind === "component" || item.kind === "layer" || item.kind === "ownership").map((item) => item.choice);
   const declaredTechnologies = input.declared.filter((item) => item.kind === "technology").map((item) => item.choice);
+  const undetected = declaredTechnologies.filter((name) => !detectedTechnologies.includes(name.toLowerCase()));
+  detectedTechnologies.push(...technologiesInSource(undetected, files, input.root));
   const violations: ArchitectureViolation[] = [];
   if (input.declared.length === 0) {
     return {

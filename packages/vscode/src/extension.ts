@@ -126,6 +126,7 @@ class MissionView implements vscode.WebviewViewProvider {
     webviewView.webview.options = { enableScripts: true, localResourceRoots: [] };
     missionView = webviewView;
     missionWebview = webviewView.webview;
+    missionPainted = null;
     webviewView.webview.onDidReceiveMessage((msg: { type?: string; text?: unknown; identity?: unknown; reason?: unknown }) => {
       if (msg.type === "submit") submitMission(String(msg.text ?? ""), this.diagnostics);
       if (msg.type === "forgeAnswer") submitForgeAnswer(String(msg.text ?? ""), this.diagnostics);
@@ -140,6 +141,7 @@ class MissionView implements vscode.WebviewViewProvider {
     webviewView.onDidDispose(() => {
       missionView = null;
       missionWebview = null;
+      missionPainted = null;
     });
     paintMission(webviewView.webview);
   }
@@ -162,12 +164,21 @@ function refresh(diagnostics: vscode.DiagnosticCollection): void {
   publishDiagnostics(diagnostics);
 }
 
+/** The last page set on the Mission view, without its nonce, so an unchanged refresh does not reload the webview. */
+let missionPainted: string | null = null;
+
 function paintMission(webview: vscode.Webview): void {
   const nonce = crypto.randomBytes(16).toString("base64");
-  if (!plane) {
-    webview.html = composerPage(nonce, "<p>Open a workspace folder.</p>");
-    return;
-  }
+  const html = missionPage(nonce);
+  // Reloading the webview resets its scroll position, focus, and any text a person is typing, so only reload on change.
+  const content = html.split(nonce).join("");
+  if (content === missionPainted) return;
+  missionPainted = content;
+  webview.html = html;
+}
+
+function missionPage(nonce: string): string {
+  if (!plane) return composerPage(nonce, "<p>Open a workspace folder.</p>");
   let mission: Mission | null = null;
   try {
     mission = plane.mission();
@@ -178,21 +189,17 @@ function paintMission(webview: vscode.Webview): void {
   const form = renderComposer(mission, nonce);
   composer.focus = false;
   const gates = renderHumanGates(mission, nonce);
-  if (!mission) {
-    webview.html = composerPage(nonce, `${form}${gates}`);
-    return;
-  }
+  if (!mission) return composerPage(nonce, `${form}${gates}`);
   let html: string;
   try {
     html = renderMissionControl(mission);
   } catch (error) {
-    webview.html = composerPage(nonce, `${form}${gates}<p class="error">Mission Control could not render ${escapeHtml(mission.id)}: ${escapeHtml(message(error))}</p>`);
-    return;
+    return composerPage(nonce, `${form}${gates}<p class="error">Mission Control could not render ${escapeHtml(mission.id)}: ${escapeHtml(message(error))}</p>`);
   }
   // Mission Control ships a script-free CSP; widen it only for this nonce so the composer can post back.
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />`;
   const csped = html.replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, csp);
-  webview.html = csped.includes("<body>") && csped !== html ? csped.replace("<body>", `<body>${form}${gates}`) : composerPage(nonce, `${form}${gates}<p class="error">Mission Control layout changed; showing the composer only.</p>`);
+  return csped.includes("<body>") && csped !== html ? csped.replace("<body>", `<body>${form}${gates}`) : composerPage(nonce, `${form}${gates}<p class="error">Mission Control layout changed; showing the composer only.</p>`);
 }
 
 function composerPage(nonce: string, body: string): string {
@@ -245,13 +252,16 @@ function renderComposer(mission: Mission | null, nonce: string): string {
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   window.bmadVscode = vscode;
+  // Webview state survives the page being reloaded with new content; merge into it so each form keeps its own part.
+  const save = (patch) => vscode.setState(Object.assign({}, vscode.getState() || {}, patch));
+  window.bmadSave = save;
   const idea = document.getElementById("idea");
   const submit = document.getElementById("submit");
   const errorBox = document.getElementById("error");
   const wrapper = document.getElementById("composer");
   const saved = vscode.getState();
   if (!idea.value && saved && saved.draft) idea.value = saved.draft;
-  idea.addEventListener("input", () => vscode.setState({ draft: idea.value }));
+  idea.addEventListener("input", () => save({ draft: idea.value }));
   function showError(text) { errorBox.textContent = text; errorBox.hidden = !text; }
   function send() {
     const text = idea.value.trim();
@@ -259,26 +269,29 @@ function renderComposer(mission: Mission | null, nonce: string): string {
     showError("");
     submit.disabled = true;
     submit.textContent = "Creating mission…";
-    vscode.setState({ draft: "" });
+    save({ draft: "" });
     vscode.postMessage({ type: "submit", text });
   }
   function cancel() {
     idea.value = "";
     showError("");
-    vscode.setState({ draft: "" });
+    save({ draft: "" });
     vscode.postMessage({ type: "cancel" });
     if (wrapper.tagName === "DETAILS") wrapper.open = false;
   }
-  function focusIdea() { if (wrapper.tagName === "DETAILS") wrapper.open = true; idea.focus(); }
+  function focusIdea() { if (wrapper.tagName === "DETAILS") wrapper.open = true; idea.focus(); window.bmadFocused = true; }
   submit.addEventListener("click", send);
   document.getElementById("cancel").addEventListener("click", cancel);
-  document.getElementById("example").addEventListener("click", () => { idea.value = ${JSON.stringify(IDEA_EXAMPLE)}; vscode.setState({ draft: idea.value }); idea.focus(); });
+  document.getElementById("example").addEventListener("click", () => { idea.value = ${JSON.stringify(IDEA_EXAMPLE)}; save({ draft: idea.value }); idea.focus(); });
   idea.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
     else if (event.key === "Escape") { event.preventDefault(); cancel(); }
   });
   window.addEventListener("message", (event) => { if (event.data && event.data.type === "focus") focusIdea(); });
   if (${mission ? String(composer.focus || Boolean(composer.error)) : "true"}) focusIdea();
+  // A refresh reloads the page; return to where the person was reading unless a form just took focus.
+  window.addEventListener("scroll", () => save({ scroll: window.scrollY }), { passive: true });
+  window.addEventListener("DOMContentLoaded", () => { if (!window.bmadFocused && saved && saved.scroll) window.scrollTo(0, saved.scroll); });
 </script>`;
 }
 
@@ -296,6 +309,7 @@ function renderHumanGates(mission: Mission | null, nonce: string): string {
       <textarea id="gate-text" rows="5" placeholder="${escapeHtml(open.why)}"></textarea>
       <div class="actions"><button type="button" id="gate-submit">Record answer</button></div>`,
       `{ type: "forgeAnswer", text: text }`,
+      `forge:${open.id}`,
     );
   }
   if (mission.tickets.length > 0 && !mission.ticketTreeAccepted) {
@@ -309,6 +323,7 @@ function renderHumanGates(mission: Mission | null, nonce: string): string {
       <textarea id="gate-text" rows="2" placeholder="Name recorded with the acceptance"></textarea>
       <div class="actions"><button type="button" id="gate-submit">Accept and continue</button></div>`,
       `{ type: "acceptTickets", identity: text }`,
+      "accept-tickets",
     );
   }
   let report: ReturnType<typeof evaluateRelease> | null = null;
@@ -319,13 +334,15 @@ function renderHumanGates(mission: Mission | null, nonce: string): string {
   }
   const human = report?.criteria.find((item) => item.id === "human-release");
   const automatedOpen = report?.criteria.filter((item) => item.id !== "human-release" && item.state !== "pass" && item.state !== "waived") ?? [];
-  if (mission.loop === "blocked" || mission.loop === "draft") {
+  // While the autopilot runs, offering to continue it would only start a second run.
+  if ((mission.loop === "blocked" || mission.loop === "draft") && !autopilotRunning()) {
     const resume = humanGatePage(
       nonce,
       `<h2>Continue this mission</h2>
       <p>Active mission <code>${escapeHtml(mission.id)}</code> · loop <strong>${escapeHtml(mission.loop)}</strong>.</p>
       <div class="actions"><button type="button" id="gate-submit">Continue autopilot</button></div>`,
       `{ type: "resumeAutopilot" }`,
+      "resume",
     );
     if (!open && (mission.tickets.length === 0 || mission.ticketTreeAccepted)) {
       // Fall through to resume when no forge/accept form is showing.
@@ -343,23 +360,49 @@ function renderHumanGates(mission: Mission | null, nonce: string): string {
       <textarea id="gate-reason" rows="3" placeholder="Reason recorded with the approval"></textarea>
       <div class="actions"><button type="button" id="gate-submit">Approve release</button></div>`,
       `{ type: "approveRelease", identity: text, reason: (document.getElementById("gate-reason") && document.getElementById("gate-reason").value || "").trim() }`,
+      "approve-release",
     );
   }
   return "";
 }
 
-function humanGatePage(nonce: string, body: string, payload: string): string {
+function humanGatePage(nonce: string, body: string, payload: string, key: string): string {
   return `<section class="bmad-composer" id="human-gate">${body}</section>
 <script nonce="${nonce}">
   const vscodeGate = window.bmadVscode || acquireVsCodeApi();
+  const gateState = () => vscodeGate.getState() || {};
+  const saveGate = (patch) => vscodeGate.setState(Object.assign({}, gateState(), patch));
+  const gateKey = ${JSON.stringify(key)};
   const gateText = document.getElementById("gate-text");
+  const gateReason = document.getElementById("gate-reason");
   const gateSubmit = document.getElementById("gate-submit");
-  if (gateText) gateText.focus();
+  const gateFields = [gateText, gateReason].filter(Boolean);
+  // The page reloads whenever the mission changes; keep what the person typed into this gate and where they typed it.
+  const previous = gateState();
+  const draft = previous.gateDraft && previous.gateDraft.key === gateKey ? previous.gateDraft : null;
+  if (draft && gateText && draft.text) gateText.value = draft.text;
+  if (draft && gateReason && draft.reason) gateReason.value = draft.reason;
+  const keep = () => saveGate({ gateDraft: { key: gateKey, text: gateText ? gateText.value : "", reason: gateReason ? gateReason.value : "" } });
+  const focusField = (field) => { field.focus(); field.selectionStart = field.selectionEnd = field.value.length; window.bmadFocused = true; };
+  for (const field of gateFields) {
+    field.addEventListener("input", keep);
+    field.addEventListener("focus", () => saveGate({ gateFocus: field.id }));
+    field.addEventListener("blur", () => saveGate({ gateFocus: null }));
+  }
+  if (previous.gateSeen !== gateKey) {
+    saveGate({ gateSeen: gateKey, gateFocus: null });
+    if (gateText) focusField(gateText);
+  } else {
+    const focused = gateFields.find((field) => field.id === previous.gateFocus);
+    if (focused) focusField(focused);
+  }
   if (gateSubmit) {
     gateSubmit.addEventListener("click", () => {
       const text = gateText ? gateText.value.trim() : "continue";
       if (gateText && !text) { gateText.focus(); return; }
+      if (gateReason && !gateReason.value.trim()) { gateReason.focus(); return; }
       gateSubmit.disabled = true;
+      saveGate({ gateDraft: null, gateFocus: null });
       vscodeGate.postMessage(${payload});
     });
     if (gateText) {
@@ -423,11 +466,18 @@ function submitMission(text: string, diagnostics: vscode.DiagnosticCollection): 
 function submitForgeAnswer(text: string, diagnostics: vscode.DiagnosticCollection): void {
   try {
     const mission = requirePlane().mission();
-    requirePlane().answerForge(mission.id, text);
+    const updated = requirePlane().answerForge(mission.id, text);
     refresh(diagnostics);
+    const open = (updated.forge?.questions ?? []).filter((question) => !updated.forge?.answered.includes(question.id));
+    resumeAutopilot(open.length === 0);
   } catch (error) {
     void vscode.window.showErrorMessage(message(error));
   }
+}
+
+/** A running autopilot picks up a person's decision itself; after a reload nothing is waiting, so start one. */
+function resumeAutopilot(ready: boolean): void {
+  if (ready && !autopilotRunning()) void vscode.commands.executeCommand("bmad-next.autopilot");
 }
 
 function submitTicketAcceptance(identity: string, diagnostics: vscode.DiagnosticCollection): void {
@@ -436,6 +486,7 @@ function submitTicketAcceptance(identity: string, diagnostics: vscode.Diagnostic
     const mission = requirePlane().mission();
     requirePlane().acceptTicketTree(mission.id, identity.trim());
     refresh(diagnostics);
+    resumeAutopilot(true);
   } catch (error) {
     void vscode.window.showErrorMessage(message(error));
   }
@@ -447,7 +498,8 @@ function submitReleaseApproval(identity: string, reason: string, diagnostics: vs
     const mission = requirePlane().mission();
     requirePlane().approve(mission.id, "release", identity.trim(), reason.trim());
     refresh(diagnostics);
-    void vscode.commands.executeCommand("bmad-next.release");
+    // A waiting autopilot runs the release gate itself once it sees the approval.
+    if (!autopilotRunning()) void vscode.commands.executeCommand("bmad-next.release");
   } catch (error) {
     void vscode.window.showErrorMessage(message(error));
   }

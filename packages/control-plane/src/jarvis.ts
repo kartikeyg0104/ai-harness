@@ -359,7 +359,7 @@ export function deriveTimeline(events: DomainEvent[], mission: Mission): Timelin
   gate("browser", "Browser", "browser");
   gate("security", "Security", "security");
   gate("nfr", "NFR", "nfr");
-  gate("architecture", "Architecture", "architecture");
+  gate("architecture", "Architecture check", "architecture");
   gate("traceability", "Traceability", "traceability");
   const approval = report.criteria.find((item) => item.id === "human-release");
   if (approval) items.push({ label: "Release approval", state: approval.state === "pass" ? "done" : approval.state === "fail" ? "failed" : "waiting" });

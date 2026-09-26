@@ -62,18 +62,20 @@ export function renderMissionControl(mission: Mission): string {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
 <title>BMAD Next</title>
 <style>
-  body { margin: 0; padding: 16px; background: #14140f; color: #f4f0e6; font: 13px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif; }
+  /* Colors follow the editor theme inside Code - OSS; the fallbacks keep the page readable outside it. */
+  body { margin: 0; padding: 12px; background: var(--vscode-sideBar-background, #14140f); color: var(--vscode-foreground, #f4f0e6); font: 13px/1.45 var(--vscode-font-family, "IBM Plex Sans", "Segoe UI", sans-serif); overflow-wrap: anywhere; }
   h1 { font-family: "IBM Plex Serif", Georgia, serif; font-weight: 500; font-size: 22px; margin: 0 0 4px; }
-  .meta { color: #c8b89a; margin-bottom: 16px; }
-  .phases { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin-bottom: 16px; }
-  .phase { background: #221f18; padding: 8px; border-top: 2px solid #d6a25e; }
+  .meta { color: var(--vscode-descriptionForeground, #c8b89a); margin-bottom: 16px; }
+  .phases { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 6px; margin-bottom: 16px; }
+  .phase { background: var(--vscode-editorWidget-background, #221f18); padding: 8px; border-top: 2px solid var(--vscode-focusBorder, #d6a25e); }
   .phase strong { display: block; font-size: 12px; }
-  .grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }
-  section { background: #1c1a15; padding: 12px; }
-  h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #d6a25e; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  section { min-width: 0; background: var(--vscode-editorWidget-background, #1c1a15); padding: 12px; }
+  h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--vscode-textLink-foreground, #d6a25e); }
+  ul, ol { padding-left: 18px; }
   li { margin: 0 0 6px; }
-  code { color: #f2d7a2; }
-  strong { color: #fff8ea; }
+  code { color: var(--vscode-textPreformat-foreground, #f2d7a2); background: var(--vscode-textPreformat-background, transparent); padding: 0 2px; border-radius: 2px; }
+  strong { color: inherit; }
   summary { cursor: pointer; }
 </style>
 </head>

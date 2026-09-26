@@ -87,7 +87,11 @@ export function failingTestSummary(log: string, limit = 12): string[] {
 }
 
 export function testCommandRanTests(stdout: string): boolean {
-  return !/(?:ℹ|#)\s+tests\s+0\b/.test(stdout);
+  if (/(?:ℹ|#)\s+tests\s+0\b/.test(stdout)) return false;
+  // An npm script that is only `node <file>.js` starts no test runner of its own. Printing "verified" and exiting 0
+  // is not a test: without a runner's summary of at least one test, nothing was checked.
+  if (!/^> node (?:\.\/)?[\w./-]+\.[cm]?js\s*$/m.test(stdout)) return true;
+  return /(?:ℹ|#)\s+tests\s+[1-9]|\b[1-9]\d* passing\b|Tests:\s+[1-9]\d* passed/.test(stdout);
 }
 
 export function gateRunState(result: EvidenceResult | undefined): GateRunState {

@@ -82,6 +82,7 @@ import type {
 import { LOOP_TRANSITIONS, emptyBrain, emptyContext } from "./types";
 import { CommandModelRunner, redactSecrets } from "./model-runner";
 import { runAutopilot, type AutopilotHooks, type AutopilotResult } from "./autopilot";
+import { repositoryMap } from "./repo-map";
 import { buildPackages, describeNpmTests, detectTestCommand, nonNodeRanTests, npmLockRoot, npmTestPlan, type TestCommand } from "./test-command";
 import { PREVIEW_MARKER, previewDir, startPreview, withPreview, type PreviewServer } from "./preview";
 import { PLAN_PROMPT_VERSION, appSource, parsePlan, planPrompt } from "./verification-plan";
@@ -214,10 +215,21 @@ export function runnerWrites(transcript: string, root: string): Set<string> | nu
   const files = new Set<string>();
   for (const match of clean.matchAll(/^\s*[←→]\s*(?:Write|Edit|Patch|MultiEdit)\s+(\S.*?)\s*$/gm)) {
     const target = match[1] ?? "";
-    const relative = path.isAbsolute(target) ? path.relative(root, target) : target;
-    if (!relative.startsWith("..")) files.add(relative.split(path.sep).join("/"));
+    const relative = path.relative(root, path.resolve(root, target));
+    // Only a ".." segment leaves the root; a file named "..." or "..notes" is still inside it.
+    const outside = relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    if (relative && !outside) files.add(relative.split(path.sep).join("/"));
   }
   return files;
+}
+
+/** A title of at most `max` characters from the first line of an idea, cut at a word and marked with an ellipsis. */
+export function shortTitle(text: string, max = 120): string {
+  const line = text.trim().split(/\r?\n/)[0]?.trim() ?? "";
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:.-]+$/, "")}…`;
 }
 
 /** A recorded human decision needs something that reads as a name: at least two letters, not just punctuation. */
@@ -274,7 +286,7 @@ export class BmadControlPlane {
     const mission: Mission = {
       schemaVersion: 1,
       id: `msn_${this.id()}`,
-      title: text.slice(0, 120),
+      title: shortTitle(text),
       input: text,
       createdAt: stamp,
       updatedAt: stamp,
@@ -688,7 +700,7 @@ export class BmadControlPlane {
         ticketRef,
         agent,
         cwd: worktreePath,
-        prompt: [ticket.title, ticket.description, ticket.verify, this.buildContext(mission), baseline ?? ""].filter((part) => part.trim().length > 0).join("\n\n"),
+        prompt: [ticket.title, ticket.description, ticket.verify, this.buildContext(mission), this.ticketMap(ticket, worktreePath) ?? "", baseline ?? ""].filter((part) => part.trim().length > 0).join("\n\n"),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3406,6 +3418,20 @@ export class BmadControlPlane {
       }
       const content = before.get(file);
       if (content && (!fs.existsSync(absolute) || !fs.readFileSync(absolute).equals(content))) fs.writeFileSync(absolute, content);
+    }
+  }
+
+  /** The tracked files most related to the ticket, for an existing repository (more than three tracked files). */
+  private ticketMap(ticket: TicketEntry, worktree: string): string | null {
+    const tracked = this.runner.run("git", ["ls-files"], worktree, 10000);
+    const files = tracked.exitCode === 0 ? tracked.stdout.split("\n").map((line) => line.trim()).filter(Boolean) : [];
+    if (files.length <= 3) return null;
+    try {
+      // The owner/repo#n reference names the repository, not the change.
+      const title = ticket.title.replace(/[\w.-]+\/[\w.-]+#\d+/g, " ");
+      return repositoryMap(worktree, files, title, ticket.description ?? "");
+    } catch {
+      return null;
     }
   }
 
