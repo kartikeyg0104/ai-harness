@@ -29,6 +29,7 @@
     },
     "views": {
       "bmad-next": [
+        { "type": "webview", "id": "bmad-next.jarvis", "name": "Jarvis" },
         { "type": "webview", "id": "bmad-next.missionControl", "name": "Mission" },
         { "id": "bmad-next.requirements", "name": "Requirements" },
         { "id": "bmad-next.tickets", "name": "Stories" },
@@ -40,7 +41,7 @@
       ]
     },
     "commands": [
-      { "command": "bmad-next.mission", "title": "BMAD: New Mission" },
+      { "command": "bmad-next.mission", "title": "BMAD: New Mission", "icon": "$(add)" },
       { "command": "bmad-next.forgeAnswer", "title": "BMAD: Answer Forge Question" },
       { "command": "bmad-next.harden", "title": "BMAD: Harden Forge" },
       { "command": "bmad-next.acceptTickets", "title": "BMAD: Accept Ticket Tree" },
@@ -48,8 +49,74 @@
       { "command": "bmad-next.release", "title": "BMAD: Run Release Gate" },
       { "command": "bmad-next.doctor", "title": "BMAD Next: Doctor" },
       { "command": "bmad-next.repair", "title": "BMAD: Fix with BMAD" },
-      { "command": "bmad-next.refresh", "title": "BMAD: Refresh" }
+      { "command": "bmad-next.refresh", "title": "BMAD: Refresh" },
+      { "command": "bmad-next.autopilot", "title": "BMAD: Run Mission Autopilot", "icon": "$(play)" },
+      { "command": "bmad-next.stopAutopilot", "title": "BMAD: Stop Autopilot" },
+      { "command": "bmad-next.runNextStep", "title": "BMAD: Run Next Workflow Step" },
+      { "command": "bmad-next.runSkill", "title": "BMAD: Run Workflow Skill…" },
+      { "command": "bmad-next.proposeStories", "title": "BMAD: Propose Stories" },
+      { "command": "bmad-next.build", "title": "BMAD: Build Ticket…" },
+      { "command": "bmad-next.review", "title": "BMAD: Review Ticket…" },
+      { "command": "bmad-next.attack", "title": "BMAD: Attack Ticket…" },
+      { "command": "bmad-next.planVerification", "title": "BMAD: Plan Browser and NFR Verification…" },
+      { "command": "bmad-next.browser", "title": "BMAD: Run Browser Verification" },
+      { "command": "bmad-next.security", "title": "BMAD: Run Security Scan" },
+      { "command": "bmad-next.nfr", "title": "BMAD: Measure NFRs" },
+      { "command": "bmad-next.verifyArchitecture", "title": "BMAD: Verify Architecture" },
+      { "command": "bmad-next.traceability", "title": "BMAD: Verify Traceability" },
+      { "command": "bmad-next.requireAllGates", "title": "BMAD: Require All Release Gates" },
+      { "command": "bmad-next.jarvis.activate", "title": "BMAD Next: Activate Jarvis Mode", "icon": "$(zap)" },
+      { "command": "bmad-next.jarvis.exit", "title": "BMAD Next: Exit Jarvis Mode" },
+      { "command": "bmad-next.jarvis.pause", "title": "BMAD Next: Pause Jarvis" },
+      { "command": "bmad-next.jarvis.resume", "title": "BMAD Next: Resume Jarvis" },
+      { "command": "bmad-next.jarvis.stopSpeaking", "title": "BMAD Next: Stop Jarvis Speaking" },
+      { "command": "bmad-next.jarvis.toggle", "title": "BMAD Next: Toggle Jarvis Mode" },
+      { "command": "bmad-next.approveRelease", "title": "BMAD: Approve Release…" },
+      { "command": "bmad-next.rejectRelease", "title": "BMAD: Reject Release…" }
     ],
+    "menus": {
+      "view/title": [
+        { "command": "bmad-next.mission", "when": "view == bmad-next.missionControl", "group": "navigation" },
+        { "command": "bmad-next.autopilot", "when": "view == bmad-next.missionControl", "group": "navigation" }
+      ]
+    },
+    "keybindings": [
+      { "command": "bmad-next.jarvis.toggle", "key": "ctrl+shift+j", "mac": "cmd+shift+j", "when": "!searchViewletFocus" }
+    ],
+    "configuration": {
+      "title": "BMAD Next",
+      "properties": {
+        "bmadNext.jarvis.voiceInput": {
+          "type": "string",
+          "enum": ["gemini", "off"],
+          "default": "gemini",
+          "description": "Voice intent provider for Jarvis. Gemini reads GEMINI_API_KEY and GEMINI_MODEL from the extension host environment; the key never reaches a webview. Typed commands always work."
+        },
+        "bmadNext.jarvis.voiceOutput": {
+          "type": "string",
+          "enum": ["system", "off"],
+          "default": "system",
+          "description": "Spoken narration through the system voice (macOS say). Off keeps narration as text."
+        },
+        "bmadNext.jarvis.narration": {
+          "type": "string",
+          "enum": ["important", "all", "off"],
+          "default": "important",
+          "description": "Which real mission events Jarvis narrates: important, warning, error, and completion events; all events; or none."
+        },
+        "bmadNext.jarvis.autoListen": {
+          "type": "string",
+          "enum": ["off", "pushToTalk"],
+          "default": "pushToTalk",
+          "description": "How Jarvis listens. Push-to-talk records only while the talk button is held. Continuous session listening is not offered: it would keep the microphone open between requests."
+        },
+        "bmadNext.jarvis.microphoneDevice": {
+          "type": "string",
+          "default": ":0",
+          "description": "AVFoundation audio device for push-to-talk, as ffmpeg names it (for example :0)."
+        }
+      }
+    },
     "chatParticipants": [
       {
         "id": "bmad.next",

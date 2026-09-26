@@ -1,4 +1,4 @@
-import { fileExists, partitionEvidence, requiredEvidenceKinds, requirementCoverage } from "./quality";
+import { fileExists, implementationLinks, partitionEvidence, requirementCoverage, requirementKinds } from "./quality";
 import type { Mission, Requirement } from "./types";
 
 export interface TraceLinks {
@@ -54,11 +54,11 @@ export function traceMission(mission: Mission, timestamp: string): TraceabilityD
   }
   const requirements = mission.requirements.map((requirement) => {
     const tickets = mission.tickets.filter((ticket) => ticket.covers.includes(requirement.id));
-    const applicable = requirement.verification_methods.length > 0 ? requirement.verification_methods : requiredEvidenceKinds(requirement.risk, mission.attackRiskFloor ?? "high");
+    const applicable = requirementKinds(requirement, mission);
     const links: TraceLinks = {
       acceptance: requirement.acceptance_criteria.filter((item) => item.trim()),
       tickets: tickets.map((ticket) => ticket.ref),
-      implementation: requirement.linked_artifacts.slice(),
+      implementation: implementationLinks(requirement, mission),
       tests: passed(mission, requirement, "unit"),
       review: passed(mission, requirement, "review"),
       attack: passed(mission, requirement, "attack"),
@@ -70,8 +70,7 @@ export function traceMission(mission: Mission, timestamp: string): TraceabilityD
     const missing: string[] = [];
     if (links.acceptance.length === 0) missing.push("acceptance criterion");
     if (links.tickets.length === 0) missing.push("ticket");
-    const built = mission.plans.some((plan) => plan.status === "built" && tickets.some((ticket) => ticket.ref === plan.ref));
-    if (links.implementation.length === 0 && !built) missing.push("implementation");
+    if (links.implementation.length === 0) missing.push("implementation");
     const kindLink: Record<string, string[]> = {
       unit: links.tests,
       review: links.review,

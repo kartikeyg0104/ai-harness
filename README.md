@@ -4,6 +4,34 @@ BMAD Next is a Code - OSS control plane for the BMAD method. It turns a software
 
 > Think it. Specify it. Design it. Build it. Break it. Prove it. Ship it. Learn from it.
 
+## Evaluation (AI Harness Hackathon 2026)
+
+Requirements: Node.js 22+, npm, git, make, and network access.
+
+```bash
+git clone https://github.com/kartikeyg0104/ai-harness.git
+cd ai-harness
+export AI_API_KEY="<PROVIDED_API_KEY>"
+make setup   # npm ci (includes the pinned OpenCode runtime), build, optional Chromium
+make run     # launch the harness session
+make test    # 168 tests, no model calls
+make clean   # remove build output and harness workspaces
+```
+
+`make run` opens an interactive terminal session. At the `issue>` prompt, give it one of:
+
+| Input | What the harness does |
+| --- | --- |
+| `https://github.com/<owner>/<repo>/issues/<n>` or `<owner>/<repo>#<n>` | Fetches the issue and its comments, clones the repository into `workspace/`, and resolves the issue in an isolated git worktree |
+| `@path/to/issue.md` | Reads the issue text from a file |
+| Plain text, ended by a line containing only `.` | Treats the text as the issue, in a new repository or the one set with `repo <url or path>` |
+
+For each issue the harness creates a BMAD mission. It plans (spec, PRD, architecture), proposes tickets, builds each ticket with the coding agent, runs the tests, has a separate read-only reviewer and attacker inspect the change, repairs it when those gates fail, and evaluates the release gate. It stops when a person must decide something. In an interactive session it asks the question. With `make run AUTO=1` or piped input it takes the defaults. Results go to `workspace/results/<mission-id>/`: one `ticket-<ref>.patch` per ticket plus `summary.json`. The patched worktree stays under `workspace/<repo>/.bmad-next/worktrees/`.
+
+Non-interactive options: `make run ISSUE=https://github.com/o/r/issues/1` starts with that issue. `echo "issue text" | make run` runs once and exits. `make run REPO=<url|path>` applies plain-text issues to that repository.
+
+**Model and credential.** The model is defined in [`harness.config.json`](harness.config.json): provider `nvidia`, model `openai/gpt-oss-20b`, temperature `0`, and text-only. `AI_PROVIDER`, `AI_MODEL`, and `AI_BASE_URL` override those fields without editing any file. Set `AI_PROVIDER=openai-compatible` with `AI_BASE_URL` to use any OpenAI-compatible endpoint. The credential is read only from `AI_API_KEY`. The harness writes `.harness/opencode.json` (gitignored), which refers to the key as `{env:AI_API_KEY}`, so the value never reaches disk, a log, or a command line. The coding agent, reviewer, and attacker all use that one model. `GITHUB_TOKEN` is optional; it raises GitHub's anonymous API rate limit.
+
 ## What this repository runs
 
 - Mission state, forge sessions, requirements, and a ticket tree compatible with current BMAD (`tickets.toml` carries entries; status lives in plan files).
@@ -94,6 +122,7 @@ packages/vscode          Code - OSS extension
 sources/manifest.json    repository classification
 docs/ARCHITECTURE.md     ticket tree, state machine, and release rules
 docs/IMPLEMENTATION_STATUS.md   what is running, partial, or absent
+docs/FINAL_GAP_ANALYSIS.md      audit of what actually executes
 docs/USER_GUIDE.md        how to run a mission
 docs/DEVELOPER_GUIDE.md   where to change the control plane
 docs/PROVIDER_GUIDE.md    runtime and tool availability
@@ -102,5 +131,33 @@ docs/RELEASES.md          effective evidence, approval, and immutability
 docs/EXTENDING_BMAD.md    plugins, builder drafts, and modules
 ```
 
-BMAD, BMad Method, and BMad Core are trademarks of BMad Code, LLC. This project does not vendor upstream BMAD source. See `THIRD_PARTY_NOTICES.md`.
-# ai-harness
+## Demo
+
+`bmad-next demo fresh` creates `.bmad-demo`, a separate git workspace. It does not touch missions in this repository. `bmad-next demo run` answers the forge, builds ticket 1.1 with the configured runtime, and stops when a gate fails. It does not invent a pass and it does not approve the release for you. `bmad-next demo reset` deletes only `.bmad-demo`.
+
+```bash
+export BMAD_RUNTIME=opencode
+export BMAD_MODEL=nvidia/openai/gpt-oss-20b
+node packages/cli/dist/main.js demo fresh
+node packages/cli/dist/main.js demo run
+```
+
+`scripts/demo.sh` runs the build, doctor, fresh, and run. A failed gate exits non-zero and leaves the demo mission on disk.
+
+## Quickstart
+
+See `docs/QUICKSTART.md`. The manual checklist is `docs/USER_TEST_PLAN.md`. Command-level notes are in `docs/TESTING_BMAD_NEXT.md`.
+
+## Troubleshooting
+
+A model timeout, a missing runtime, a missing browser, or a missing security tool stays `NOT_CONFIGURED`, `TIMEOUT`, or `FAILED`. Doctor prints the missing command. Availability is not a verification pass. Docker, OpenHands, Qwen, Goose, SWE-agent, ACP, A2A, MCP, and the observability hosts are optional. The local path is BMAD plus OpenCode, Playwright, Semgrep, Trivy, and TruffleHog.
+
+## Known limitations
+
+Upstream BMAD Loop, BMAD Builder, and TEA execution are not vendored. Remote marketplace, tree-sitter, Zoekt, Aider, Context7, Git MCP, LiteLLM, Langfuse, Phoenix, Promptfoo, SWE-bench, BrowserGym, and Renovate stay unconfigured when their binaries or endpoints are absent. The VS Code Extension Development Host was not launched in this environment, so the activity bar is not GUI-verified. `release.json` is written only when every applicable gate passes, including a named human approval.
+
+## License
+
+MIT. See `LICENSE` if present, and `THIRD_PARTY_NOTICES.md`.
+
+BMAD, BMad Method, and BMad Core are trademarks of BMad Code, LLC. This project does not vendor upstream BMAD source.

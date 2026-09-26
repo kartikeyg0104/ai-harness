@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CommandModelRunner, parseRunnerArgs, redactSecrets, safeModelName } from "./model-runner";
+import { extractJson, isPlaceholder, normalizeCategory, normalizeSeverity } from "./reviewer";
 import type { ReviewFinding } from "./reviewer";
 import type { BmadRunnerConfig, CommandRunner, ControlConfig } from "./types";
 
@@ -23,6 +24,8 @@ export interface AttackContext {
   tests: { result: string; exitCode: number | null; command: string } | null;
   reviewFindings: Array<{ id: string; severity: string; message: string }>;
   worktree: string;
+  nonGoals?: string;
+  servedApp?: string | null;
 }
 
 export interface AttackFinding extends ReviewFinding {
@@ -39,6 +42,8 @@ export interface AttackResult {
   model: string | null;
   durationMs: number | null;
   exitCode: number | null;
+  /** Redacted attacker output, kept so a BLOCKED attack can be diagnosed. */
+  rawOutput?: string;
 }
 
 export interface AttackRunner {
@@ -75,9 +80,12 @@ export function attackPrompt(context: AttackContext): string {
   const body = [
     "You are attacking an implementation. Attempt to demonstrate that it does not satisfy its requirements.",
     "",
-    "You are read-only. Do not write, commit, push, or deploy.",
+    "You are read-only. Do not write, commit, push, or deploy. Your working directory is the ticket worktree; you may open its files.",
     "",
-    "Investigate edge cases, invalid input, error handling, boundary conditions, security, concurrency, state transitions, data integrity, failure recovery, requirement gaps, and architecture violations.",
+    "Investigate whether the acceptance criteria can be broken. Stay inside the stated requirements and non-goals.",
+    "",
+    "FAIL only when you can demonstrate that an acceptance criterion is not met. Do not FAIL for multi-tab concurrency, Node test-harness fallbacks, silent no-ops on missing ids, or conservative handling of corrupt storage unless a criterion requires those behaviors.",
+    "A web application without an index.html page the browser can open fails the requirement.",
     "",
     "A passing test suite is not an attack pass. An empty note is not an attack pass. Return only JSON.",
     "",
@@ -89,6 +97,12 @@ export function attackPrompt(context: AttackContext): string {
     "",
     "Requirements:",
     context.requirements.map((requirement) => `${requirement.id} ${requirement.title}\n${requirement.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`).join("\n\n") || "(none)",
+    "",
+    "Non-goals:",
+    context.nonGoals?.trim() || "(none)",
+    "",
+    "Served web page:",
+    context.servedApp ?? "(none)",
     "",
     "Architecture:",
     context.architecture.map((item) => `${item.id}: ${item.choice}`).join("\n") || "(none)",
@@ -105,6 +119,7 @@ export function attackPrompt(context: AttackContext): string {
     "Diff:",
     context.diff || "(empty)",
     "",
+    "Finding severity is one of info, low, medium, high, critical. Category is one of correctness, security, edge-case, recovery, requirements, architecture. Every finding has a message; omit empty findings.",
     'JSON shape: {"status":"PASS|FAIL","summary":"...","findings":[{"id":"ATT-001","severity":"high","category":"correctness|security|edge-case|recovery","message":"...","file":"...","line":1}]}',
   ].join("\n");
   return redactSecrets(body);
@@ -140,6 +155,7 @@ export function judgeAttack(input: AttackJudgeInput): AttackResult {
     model: input.model,
     durationMs: input.durationMs,
     exitCode: input.exitCode,
+    rawOutput: input.raw ? redactSecrets(input.raw).slice(-20000) : undefined,
   };
   if (input.processStatus === "not-configured") {
     return { ...base, status: "NOT_CONFIGURED", summary: "status: blocked\nNo attacker executed. A passing review is not an attack pass." };
@@ -163,10 +179,36 @@ export function judgeAttack(input: AttackJudgeInput): AttackResult {
   if (!findings) return { ...base, summary: "status: blocked\nAttack findings are not valid." };
   const summary = typeof parsed.summary === "string" && parsed.summary.trim() ? redactSecrets(parsed.summary.trim()) : "Attack returned no summary.";
   const blocking = findings.some((finding) => finding.severity === "high" || finding.severity === "critical");
-  if (parsed.status === "FAIL" || blocking) {
+  if (blocking) {
     return { ...base, status: "FAIL", findings, summary };
   }
+  if (parsed.status === "FAIL" && findings.length === 0) {
+    return { ...base, summary: "status: blocked\nAttack claimed FAIL without a finding." };
+  }
   return { ...base, status: "PASS", findings, summary };
+}
+
+/** A web ticket with no page cannot satisfy add/complete/delete/reload, regardless of attacker prose. */
+export function applyAttackSurface(result: AttackResult, options: { webAppWithoutPage?: boolean }): AttackResult {
+  if (!options.webAppWithoutPage || result.status === "NOT_CONFIGURED") return result;
+  if (result.findings.some((finding) => finding.id === "ATT-UI")) {
+    return { ...result, status: "FAIL" };
+  }
+  const finding: AttackFinding = {
+    id: "ATT-UI",
+    severity: "high",
+    category: "requirements",
+    code: "ATTACK_FAILURE",
+    message: "No index.html to serve. A web app without a page cannot add, complete, delete, and persist todos across reload.",
+    file: "index.html",
+    repair: "Create an index.html page plus the JavaScript it needs for add, complete, delete, and localStorage persistence. Keep the built protocol marker.",
+  };
+  return {
+    ...result,
+    status: "FAIL",
+    findings: [...result.findings, finding],
+    summary: finding.message,
+  };
 }
 
 export function downgradeAttack(result: AttackResult, options: { evidenceExists?: boolean; worktreeMutated?: boolean }): AttackResult {
@@ -205,13 +247,16 @@ export class CommandAttacker implements AttackRunner {
     if (!this.config?.command || !this.available()) {
       return judgeAttack({ raw: "", processStatus: "not-configured", exitCode: null, attackerId: this.id, model: this.config?.model ?? null, durationMs: null, prompt });
     }
+    // Read-only attackers run inside the ticket worktree so they can open the implementation; the plane
+    // fingerprints the worktree before and after and blocks the attack if anything changed.
     const scratch = path.join(this.root, ".bmad-next", "missions", context.missionId, "attack-cwd");
     fs.mkdirSync(scratch, { recursive: true });
+    const cwd = context.worktree && fs.existsSync(context.worktree) ? context.worktree : scratch;
     const result = this.runner.runSync({
       skillId: "bmad-attack",
       prompt,
       input: "",
-      cwd: scratch,
+      cwd,
       timeoutMs: this.config.timeoutMs ?? 120000,
     });
     return judgeAttack({
@@ -283,18 +328,6 @@ export class DeterministicAttacker implements AttackRunner {
   }
 }
 
-function extractJson(raw: string): Record<string, unknown> {
-  const trimmed = raw.trim();
-  if (!trimmed) throw new Error("empty");
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const text = (fenced?.[1] ?? trimmed).trim();
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("no object");
-  const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-  return parsed as Record<string, unknown>;
-}
 
 function parseAttackFindings(value: unknown): AttackFinding[] | null {
   if (!Array.isArray(value)) return null;
@@ -305,15 +338,18 @@ function parseAttackFindings(value: unknown): AttackFinding[] | null {
     const item = value[index];
     if (!item || typeof item !== "object") return null;
     const record = item as Record<string, unknown>;
-    if (typeof record.message !== "string" || !record.message.trim()) return null;
-    if (typeof record.severity !== "string" || !severities.has(record.severity)) return null;
-    if (typeof record.category !== "string" || !categories.has(record.category)) return null;
-    const category = record.category === "recovery" ? "edge-case" : record.category;
+    const placeholder = isPlaceholder(record);
+    if (placeholder === "skip") continue;
+    if (placeholder === "invalid" || typeof record.message !== "string") return null;
+    const severity = normalizeSeverity(record.severity);
+    if (!severity || !severities.has(severity)) return null;
+    const raw = normalizeCategory(record.category, categories, "correctness");
+    const category = raw === "recovery" ? "edge-case" : raw;
     findings.push({
       id: typeof record.id === "string" && record.id.trim() ? record.id.trim() : `ATT-${String(index + 1).padStart(3, "0")}`,
-      severity: record.severity as AttackFinding["severity"],
+      severity,
       category: category as AttackFinding["category"],
-      code: attackCode(record.category),
+      code: attackCode(raw),
       message: redactSecrets(record.message.trim()),
       file: typeof record.file === "string" ? record.file : undefined,
       line: typeof record.line === "number" ? record.line : undefined,

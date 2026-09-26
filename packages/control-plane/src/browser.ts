@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { executeBrowserScenario } from "./browser-runner";
+import { nodeProcess } from "./node-process";
 import { decideCommand } from "./policy";
 import type { Autonomy } from "./types";
 
@@ -146,10 +147,12 @@ export function validateScenario(scenario: BrowserScenario, origins: string[], a
 
 export function probePlaywright(): BrowserReadiness & { browserVersion: string | null; detail: string } {
   const empty = { packageInstalled: false, binaryInstalled: false, launched: false, executed: false, passed: false, browserVersion: null, detail: "Playwright is not installed." };
-  const probe = spawnSync(process.execPath, ["-e", PLAYWRIGHT_PROBE], {
+  const node = nodeProcess();
+  const probe = spawnSync(node.command, ["-e", PLAYWRIGHT_PROBE], {
     cwd: packageRoot(),
     encoding: "utf8",
     timeout: 20000,
+    env: node.env,
   });
   if (probe.error || probe.status !== 0) {
     return { ...empty, detail: (probe.stderr || probe.stdout || probe.error?.message || empty.detail).trim() };

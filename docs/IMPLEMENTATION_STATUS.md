@@ -73,7 +73,7 @@ Qwen, Goose, SWE-agent, and mini-swe-agent are registered CLI adapters. They sta
 - Architecture verification. `verifyArchitecture` compares declared components, layers, technologies, forbidden dependencies, and directories with the tree. `architecture.md` alone is blocked.
 - Traceability. `verifyTraceability` writes `traceability.json`. A requirement with no ticket is a `TRACEABILITY GAP`. `FULLY PROVEN` requires the applicable evidence.
 - Release approval. `release approve` and `release reject` append decisions. The latest decision is current. `release verify` does not rewrite `release.json`. `lastVerifiedBuild` is written only when the gate first passes.
-- Browser. `PlaywrightBrowser` launches Chromium through the `playwright` package. A pass requires a launched browser, executed steps, passing assertions, and screenshot files. The live scenario `BROWSER-REQ-001` passed for `REQ-001` and stored browser version `153.0.8010.12`. Origins default to localhost. `DeterministicBrowser` is test-only and cannot pass without screenshot files. Selector self-healing and visual diff are not implemented. The older `PlaywrightBrowserProvider` only checks a `playwright` binary on `PATH` and is not the verification path.
+- Browser. `PlaywrightBrowser` launches Chromium through the `playwright` package. A pass requires a launched browser, executed steps, passing assertions, and screenshot files. The live scenario `BROWSER-REQ-001` passed for `REQ-001` and stored browser version `153.0.8010.12`. Origins default to localhost. `DeterministicBrowser` is test-only and cannot pass without screenshot files. A failed click can heal only when one control matches the step name through `getByRole`. Assertions are not changed. `captureViewports` stores desktop, tablet, and mobile screenshots when Chromium launches. The older `PlaywrightBrowserProvider` only checks a `playwright` binary on `PATH` and is not the verification path.
 - Docker sandbox. The provider exists and does not call Docker.
 - Worktrees. `executeTicket` creates `.bmad-next/worktrees/<mission>/<ticket>` and locks it. `dispatch` calls `executeTicket`, so a ticket build cannot write the main checkout. A failed `git worktree remove` keeps the lock. Docker remains `NOT CONFIGURED`.
 - Repository intelligence. The workspace directory is listed. `zoekt` and `ast-grep` are reported from `PATH`. Tree-sitter and Aider are not integrated.
@@ -92,7 +92,6 @@ Qwen, Goose, SWE-agent, and mini-swe-agent are registered CLI adapters. They sta
 
 ## NOT IMPLEMENTED
 
-- Qwen, Goose, and SWE-agent runtimes. They are manifest references only.
 - Automatic ticket status `done`.
 - Treating agent text as a successful build.
 - Publishing a skill candidate without evaluation.

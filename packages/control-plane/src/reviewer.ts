@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { detectArchitectureDrift } from "./analysis";
-import { CommandModelRunner, redactSecrets, parseRunnerArgs, safeModelName } from "./model-runner";
+import { CommandModelRunner, lastJsonObject, redactSecrets, parseRunnerArgs, safeModelName } from "./model-runner";
 import type { BmadRunnerConfig, CommandRunner, ControlConfig } from "./types";
 
 export const REVIEW_PROMPT_VERSION = "review-v1";
@@ -22,7 +22,7 @@ export interface ReviewContext {
   headCommit: string;
   changedFiles: string[];
   diff: string;
-  testEvidence: { result: string; exitCode: number | null; command: string } | null;
+  testEvidence: { result: string; exitCode: number | null; command: string; edgeCases?: "present" | "missing" } | null;
   followsRepair?: boolean;
   repairAttempt?: number;
 }
@@ -75,6 +75,10 @@ export interface ReviewResult {
   durationMs: number | null;
   exitCode: number | null;
   quality: ReviewQuality;
+  /** Redacted reviewer output, kept so a BLOCKED review can be diagnosed. */
+  rawOutput?: string;
+  /** What the reviewer could not confirm: UNCLEAR criteria and test assessments. Each blocks the review. */
+  unclear?: string[];
 }
 
 export interface Reviewer {
@@ -140,7 +144,7 @@ export function reviewPrompt(context: ReviewContext): string {
     "",
     "Do not approve based on the developer's explanation.",
     "",
-    "You are a read-only reviewer. Read the diff, tests, architecture, and requirements.",
+    "You are a read-only reviewer. Read the diff, tests, architecture, and requirements. Your working directory is the ticket worktree; you may open its files. Do not change them.",
     "Do not modify source, commit, push, deploy, or delete files.",
     "",
     "Return structured JSON only.",
@@ -148,6 +152,7 @@ export function reviewPrompt(context: ReviewContext): string {
     "A passing test command is not a review pass.",
     "Copy each criterion string exactly. Set each criterion status to PASS, FAIL, or UNCLEAR.",
     "Set tests.coversChangedBehavior, tests.wouldCatchRegression, and tests.edgeCases to PASS, FAIL, or UNCLEAR.",
+    "If Test evidence records a passing run and edgeCases is present, set tests.edgeCases to PASS unless you found a concrete missing case — then FAIL with a finding. Do not mark UNCLEAR when that evidence is already recorded.",
     "For an architecture violation, add a finding with category architecture, declaredRule, observedCode, file, and severity.",
     "",
     `promptVersion: ${REVIEW_PROMPT_VERSION}`,
@@ -175,6 +180,7 @@ export function reviewPrompt(context: ReviewContext): string {
     "Diff:",
     context.diff || "(empty)",
     "",
+    "Finding severity is one of info, low, medium, high, critical. Finding category is one of correctness, requirements, architecture, security, performance, maintainability, tests, edge-case. Every finding has a message; omit empty findings.",
     "JSON shape:",
     '{"status":"PASS|FAIL","summary":"...","findings":[{"severity":"high","category":"correctness","message":"...","file":"...","repair":"..."}],"criteria":[{"requirementId":"...","criterion":"...","status":"PASS|FAIL|UNCLEAR"}],"tests":{"coversChangedBehavior":"PASS|FAIL|UNCLEAR","wouldCatchRegression":"PASS|FAIL|UNCLEAR","edgeCases":"PASS|FAIL|UNCLEAR"}}',
     ...(context.followsRepair
@@ -193,7 +199,7 @@ export function repairBrief(input: {
   title: string;
   verify: string;
   worktree: string;
-  source: "review" | "attack" | "security";
+  source: "review" | "attack" | "security" | "tests";
   evidencePath: string;
   findings: ReviewFinding[];
   requirements: Array<{ id: string; title: string; acceptanceCriteria: string[] }>;
@@ -210,7 +216,7 @@ export function repairBrief(input: {
       `Line: ${finding.line ?? "(unspecified)"}`,
       `Requirement: ${requirement ? `${requirement.id} ${requirement.title}` : "(unspecified)"}`,
       `Acceptance criterion: ${requirement?.acceptanceCriteria.filter((item) => item.trim()).join(" ") || input.verify || "(unspecified)"}`,
-      `${input.source === "attack" ? "Attack evidence" : input.source === "security" ? "Security evidence" : "Review evidence"}: ${input.evidencePath}`,
+      `${input.source === "attack" ? "Attack evidence" : input.source === "security" ? "Security evidence" : input.source === "tests" ? "Test evidence" : "Review evidence"}: ${input.evidencePath}`,
       `Repair: ${finding.repair ?? finding.message}`,
     ].join("\n");
   });
@@ -283,10 +289,24 @@ export function judgeReview(input: JudgeInput): ReviewResult {
     return blocked({ ...base, findings: merged, criteria, architectureDrift: drift.drift }, "Reviewer status was not PASS or FAIL. The review is blocked.");
   }
   const summary = typeof parsed.summary === "string" && parsed.summary.trim() ? redactSecrets(parsed.summary.trim()) : "Reviewer returned no summary.";
+  const testKeys = ["coversChangedBehavior", "wouldCatchRegression", "edgeCases"] as const;
+  const unitPassed = input.context.testEvidence?.result === "pass";
+  const edgePresent = input.context.testEvidence?.edgeCases === "present";
+  const confirmedUnclear = testKeys.filter((key, index) => {
+    if (tests[index] !== "UNCLEAR") return false;
+    if (key === "edgeCases") return edgePresent && unitPassed;
+    return unitPassed;
+  });
+  const blockingUnclear = [
+    ...criteria.filter((item) => item.status === "UNCLEAR").map((item) => `criterion "${item.criterion}"`),
+    ...testKeys.filter((key, index) => tests[index] === "UNCLEAR" && !confirmedUnclear.includes(key)).map((key) => `tests.${key}`),
+  ];
   let status: ReviewStatus = modelStatus;
   if (criteria.some((item) => item.status === "FAIL") || tests.some((item) => item === "FAIL") || merged.some((item) => BLOCKING.has(item.severity))) {
     status = "FAIL";
-  } else if (criteria.some((item) => item.status === "UNCLEAR") || tests.some((item) => item === "UNCLEAR") || criteria.length === 0) {
+  } else if (blockingUnclear.length > 0 || criteria.length === 0) {
+    status = "BLOCKED";
+  } else if (status === "PASS" && !unitPassed) {
     status = "BLOCKED";
   } else if (status === "PASS" && (input.processStatus !== "completed" || input.exitCode !== 0)) {
     status = "BLOCKED";
@@ -299,6 +319,7 @@ export function judgeReview(input: JudgeInput): ReviewResult {
     criteria,
     architectureDrift: drift.drift,
     summary: status === "BLOCKED" && modelStatus === "PASS" ? `${summary}\nstatus: blocked` : summary,
+    unclear: blockingUnclear,
   };
   result.quality = qualityOf(result, input.durationMs);
   return result;
@@ -389,13 +410,16 @@ export class CommandReviewer implements Reviewer {
         prompt,
       });
     }
+    // Read-only reviewers run inside the ticket worktree so they can open the implementation; the plane
+    // fingerprints the worktree before and after and blocks the review if anything changed.
     const scratch = path.join(this.root, ".bmad-next", "missions", context.missionId, "review-cwd");
     fs.mkdirSync(scratch, { recursive: true });
+    const cwd = context.worktree && fs.existsSync(context.worktree) ? context.worktree : scratch;
     const result = this.runner.runSync({
       skillId: "bmad-code-review",
       prompt,
       input: "",
-      cwd: scratch,
+      cwd,
       timeoutMs: this.config.timeoutMs ?? 120000,
     });
     return judgeReview({
@@ -425,6 +449,7 @@ function emptyResult(input: JudgeInput, promptDigest: string): ReviewResult {
     durationMs: input.durationMs,
     exitCode: input.exitCode,
     quality: { findings: 0, falsePositiveFeedback: 0, repairSuccess: 0, reviewDurationMs: input.durationMs, modelCost: null },
+    rawOutput: input.raw ? redactSecrets(input.raw).slice(-20000) : undefined,
   };
 }
 
@@ -444,17 +469,74 @@ function qualityOf(result: ReviewResult, durationMs: number | null): ReviewQuali
   };
 }
 
-function extractJson(raw: string): Record<string, unknown> {
+/** The reply object: a fenced JSON block when there is one, else the last complete object after any narration. */
+export function extractJson(raw: string): Record<string, unknown> {
   const trimmed = raw.trim();
   if (!trimmed) throw new Error("empty");
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const text = (fenced?.[1] ?? trimmed).trim();
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("no object");
-  const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-  return parsed as Record<string, unknown>;
+  const fenced = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => lastJsonObject(match[1] ?? "")).filter((item) => item !== null);
+  const parsed = fenced.at(-1) ?? lastJsonObject(trimmed);
+  if (!parsed) throw new Error("no object");
+  return parsed;
+}
+
+const SEVERITY_ALIASES: Record<string, string> = { minor: "low", moderate: "medium", major: "high", blocker: "critical", severe: "critical" };
+const CATEGORY_ALIASES: Record<string, string> = {
+  "error-handling": "correctness",
+  errors: "correctness",
+  error: "correctness",
+  bug: "correctness",
+  logic: "correctness",
+  reliability: "correctness",
+  robustness: "correctness",
+  testing: "tests",
+  test: "tests",
+  "test-coverage": "tests",
+  coverage: "tests",
+  "edge-cases": "edge-case",
+  boundary: "edge-case",
+  "boundary-conditions": "edge-case",
+  requirement: "requirements",
+  "requirement-mismatch": "requirements",
+  perf: "performance",
+  efficiency: "performance",
+  design: "architecture",
+  structure: "architecture",
+  "security-issue": "security",
+  "security-issues": "security",
+  privacy: "security",
+  style: "maintainability",
+  readability: "maintainability",
+  "code-quality": "maintainability",
+  documentation: "maintainability",
+  accessibility: "maintainability",
+  usability: "maintainability",
+};
+
+/** Severity decides blocking, so an unrecognised severity stays invalid instead of being guessed. */
+export function normalizeSeverity(value: unknown): ReviewFinding["severity"] | null {
+  if (typeof value !== "string") return null;
+  const key = value.trim().toLowerCase();
+  const mapped = SEVERITY_ALIASES[key] ?? key;
+  return SEVERITIES.has(mapped) ? (mapped as ReviewFinding["severity"]) : null;
+}
+
+/** Category is a label. A known synonym maps to the contract value; an unknown label is kept as maintainability. */
+export function normalizeCategory(value: unknown, allowed: Set<string>, fallback: string): string {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  const key = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (allowed.has(key)) return key;
+  const mapped = CATEGORY_ALIASES[key];
+  return mapped && allowed.has(mapped) ? mapped : fallback;
+}
+
+/**
+ * An entry with no message is a placeholder. Info or low placeholders are dropped; a placeholder at medium or
+ * above cannot be ignored, so the caller treats it as an invalid list.
+ */
+export function isPlaceholder(record: Record<string, unknown>): "skip" | "invalid" | false {
+  if (typeof record.message === "string" && record.message.trim()) return false;
+  const severity = normalizeSeverity(record.severity);
+  return severity === null || severity === "info" || severity === "low" ? "skip" : "invalid";
 }
 
 function parseFindings(value: unknown): ReviewFinding[] | null {
@@ -464,13 +546,15 @@ function parseFindings(value: unknown): ReviewFinding[] | null {
     const item = value[index];
     if (!item || typeof item !== "object") return null;
     const record = item as Record<string, unknown>;
-    if (typeof record.message !== "string" || !record.message.trim()) return null;
-    if (typeof record.severity !== "string" || !SEVERITIES.has(record.severity)) return null;
-    if (typeof record.category !== "string" || !CATEGORIES.has(record.category)) return null;
+    const placeholder = isPlaceholder(record);
+    if (placeholder === "skip") continue;
+    if (placeholder === "invalid" || typeof record.message !== "string") return null;
+    const severity = normalizeSeverity(record.severity);
+    if (!severity) return null;
     findings.push({
       id: typeof record.id === "string" && record.id.trim() ? record.id.trim() : `REV-${String(index + 1).padStart(3, "0")}`,
-      severity: record.severity as ReviewFinding["severity"],
-      category: record.category as ReviewFinding["category"],
+      severity,
+      category: normalizeCategory(record.category, CATEGORIES, "maintainability") as ReviewFinding["category"],
       message: redactSecrets(record.message.trim()),
       file: typeof record.file === "string" ? record.file : undefined,
       line: typeof record.line === "number" ? record.line : undefined,

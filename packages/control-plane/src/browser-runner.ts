@@ -28,6 +28,9 @@ interface PageLike {
     count(): Promise<number>;
   };
   url(): string;
+  getByRole?(role: "button" | "link", options: { name: string }): { count(): Promise<number>; click(options: { timeout: number }): Promise<unknown> };
+  evaluate?<T>(expression: string): Promise<T>;
+  setViewportSize?(size: { width: number; height: number }): Promise<void>;
   on(event: "console", handler: (message: { type(): string; text(): string }) => void): void;
   on(event: "pageerror", handler: (error: Error) => void): void;
   on(event: "requestfailed", handler: (request: { url(): string; failure(): { errorText: string } | null }) => void): void;
@@ -125,8 +128,8 @@ export async function executeBrowserScenario(payload: Payload, startedAt: string
     for (const step of scenario.steps) {
       const at = new Date().toISOString();
       try {
-        await runStep(page, step, stepTimeout);
-        base.steps.push({ action: step.action, name: step.name ?? step.action, status: "completed", at });
+        const healed = await runStep(page, step, stepTimeout);
+        base.steps.push({ action: step.action, name: step.name ?? step.action, status: healed ? "healed" : "completed", at });
         if (step.action === "navigate" && !base.screenshots.some((shot) => shot.name === "start")) {
           base.screenshots.push(await shoot(page, evidenceDir, "start"));
         }
@@ -192,16 +195,64 @@ export async function executeBrowserScenario(payload: Payload, startedAt: string
   }
 }
 
-async function runStep(page: PageLike, step: BrowserStep, timeout: number): Promise<void> {
+async function runStep(page: PageLike, step: BrowserStep, timeout: number): Promise<boolean> {
   const target = step.target ?? "";
-  if (step.action === "navigate") await page.goto(target, { timeout, waitUntil: "domcontentloaded" });
-  else if (step.action === "click") await page.click(target, { timeout });
+  if (step.action === "navigate") {
+    await page.goto(target, { timeout, waitUntil: "domcontentloaded" });
+    return false;
+  }
+  if (step.action === "click") {
+    try {
+      await page.click(target, { timeout });
+      return false;
+    } catch (error) {
+      if (!step.name || !page.getByRole) throw error;
+      const locator = page.getByRole("button", { name: step.name });
+      if ((await locator.count()) !== 1) throw error;
+      await locator.click({ timeout });
+      return true;
+    }
+  }
   else if (step.action === "fill") await page.fill(target, step.value ?? "", { timeout });
   else if (step.action === "select") await page.selectOption(target, step.value ?? "", { timeout });
   else if (step.action === "wait") {
     if (/^\d+$/.test(target)) await new Promise((resolve) => setTimeout(resolve, Number(target)));
     else await page.waitForSelector(target, { timeout });
   }
+  return false;
+}
+
+export async function captureViewports(url: string, evidenceDir: string): Promise<{ viewports: Array<{ name: string; width: number; height: number; path: string; overflow: boolean }>; status: "PASS" | "FAIL" | "NOT_CONFIGURED" }> {
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  let browser: { close(): Promise<void>; newPage(): Promise<PageLike> } | null = null;
+  try {
+    const loaded = nodeRequire("playwright") as { chromium: { launch(options: { timeout: number }): Promise<NonNullable<typeof browser>> } };
+    browser = await loaded.chromium.launch({ timeout: 15000 });
+  } catch {
+    return { viewports: [], status: "NOT_CONFIGURED" };
+  }
+  const sizes = [
+    { name: "desktop", width: 1280, height: 800 },
+    { name: "tablet", width: 768, height: 1024 },
+    { name: "mobile", width: 390, height: 844 },
+  ];
+  const viewports: Array<{ name: string; width: number; height: number; path: string; overflow: boolean }> = [];
+  try {
+    const page = await browser.newPage();
+    for (const size of sizes) {
+      if (page.setViewportSize) await page.setViewportSize({ width: size.width, height: size.height });
+      await page.goto(url, { timeout: 10000, waitUntil: "domcontentloaded" });
+      const metrics = page.evaluate
+        ? await page.evaluate<{ scrollWidth: number; clientWidth: number; scrollHeight: number; clientHeight: number }>("({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, scrollHeight: document.documentElement.scrollHeight, clientHeight: document.documentElement.clientHeight })")
+        : { scrollWidth: size.width, clientWidth: size.width, scrollHeight: size.height, clientHeight: size.height };
+      const shot = path.join(evidenceDir, `${size.name}.png`);
+      await page.screenshot({ path: shot, timeout: 5000 });
+      viewports.push({ ...size, path: shot, overflow: metrics.scrollWidth > metrics.clientWidth + 1 || metrics.scrollHeight > metrics.clientHeight + 1 });
+    }
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+  return { viewports, status: viewports.some((item) => item.overflow) ? "FAIL" : "PASS" };
 }
 
 async function checkAssertion(page: PageLike, assertion: BrowserAssertion, timeout: number): Promise<BrowserResult["assertions"][number]> {

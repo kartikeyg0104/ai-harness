@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import type { EvidenceRecord, Mission } from "./types";
-import { evaluateRelease, fileExists, partitionEvidence, proofFor, releaseMatrix, requirementCoverage } from "./quality";
+import { currentResultFor, evaluateRelease, evidenceIsStale, fileExists, implementationLinks, partitionEvidence, proofFor, releaseApprovalRequired, releaseMatrix, requirementCoverage } from "./quality";
 import { projectSprint } from "./plane";
 
 export function renderMissionControl(mission: Mission): string {
@@ -21,7 +21,7 @@ export function renderMissionControl(mission: Mission): string {
     .map((question) => `<li>${escapeHtml(question.prompt)} <small>${escapeHtml(question.why)}</small></li>`)
     .join("");
   const criteria = release.criteria
-    .map((item) => `<li><span>${escapeHtml(item.label)}</span> <strong>${escapeHtml(item.state)}</strong> ${escapeHtml(item.detail)}</li>`)
+    .map((item) => `<li><span>${escapeHtml(item.label)}</span> <strong>${escapeHtml(criterionLabel(item))}</strong> ${escapeHtml(item.detail)}</li>`)
     .join("");
   const tracked = [
     ["forge", "bmad-forge-idea"],
@@ -47,10 +47,10 @@ export function renderMissionControl(mission: Mission): string {
       const status = plan?.status ?? "planned";
       const runtime = execution?.runtime ?? "not-configured";
       const worktree = execution?.worktree ?? "absent";
-      const unit = mission.evidence.find((record) => record.story_id === ticket.ref && record.kind === "unit");
-      const tests = unit?.result === "pass" ? "PASS" : unit?.result === "fail" ? "FAIL" : "NOT_RUN";
+      const unit = currentResultFor(mission, "unit", ticket.ref);
+      const tests = unit === "pass" ? "PASS" : unit === "fail" ? "FAIL" : "NOT_RUN";
       const evidence = execution?.evidence?.length ?? mission.evidence.filter((record) => record.story_id === ticket.ref).length;
-      const protocol = status === "built" ? "VALID" : "MISSING";
+      const protocol = status === "built" || (execution?.artifact && fileExists(execution.artifact)) ? "VALID" : "MISSING";
       const changed = execution?.changedFiles?.length ?? 0;
       return `<li><strong>Ticket ${escapeHtml(ticket.ref)}</strong> ${escapeHtml(ticket.title)} <em>${escapeHtml(status)}</em> <span>${escapeHtml(projectSprint(status))}</span> Skill: ${escapeHtml(execution?.skillId ?? "bmad-build")} Agent: ${escapeHtml(execution?.agent ?? "unassigned")} Runtime: ${escapeHtml(runtime)} Worktree: ${escapeHtml(worktree)} Status: ${escapeHtml((execution?.status ?? "not-configured").toUpperCase())} Changed files: ${escapeHtml(String(changed))} Protocol: ${escapeHtml(protocol)} Tests: ${escapeHtml(tests)} Evidence: ${escapeHtml(String(evidence))} Ticket: ${escapeHtml(status.toUpperCase())}</li>`;
     })
@@ -101,16 +101,33 @@ export function renderMissionControl(mission: Mission): string {
       ${renderLifecycle(mission, release.state)}
       <h2>Requirements</h2>
       <ul>${renderRequirements(mission)}</ul>
+      <h2>Evidence</h2>
+      <ul>${renderEvidence(mission)}</ul>
     </section>
     <section>
       <h2>Release gate</h2>
-      <p><strong>${escapeHtml(release.state)}</strong></p>
+      <p><strong>${escapeHtml(gateLabel(release))}</strong></p>
       <ul>${criteria}</ul>
       <p>Last verified build: ${mission.lastVerifiedBuild ? escapeHtml(mission.lastVerifiedBuild.checkpointId) : "none"}</p>
     </section>
   </div>
 </body>
 </html>`;
+}
+
+/** Not-yet-run criteria still block release, but they read as pending, not as a failure. */
+export function criterionLabel(item: { id: string; state: string; pending?: boolean }): string {
+  if (item.state === "blocked" && item.pending) return item.id === "human-release" ? "waiting for approval" : "not run yet";
+  return item.state;
+}
+
+export function gateLabel(report: { state: string; criteria: Array<{ id: string; state: string; pending?: boolean }> }): string {
+  if (report.state !== "blocked") return report.state.toUpperCase();
+  const open = report.criteria.filter((item) => item.state !== "pass" && item.state !== "waived");
+  if (open.length > 0 && open.every((item) => item.pending)) {
+    return open.every((item) => item.id === "human-release") ? "WAITING FOR APPROVAL" : `IN PROGRESS (${open.length} check${open.length === 1 ? "" : "s"} not run yet)`;
+  }
+  return "BLOCKED";
 }
 
 function renderReview(mission: Mission): string {
@@ -164,9 +181,19 @@ function renderLifecycle(mission: Mission, releaseState: string): string {
   const exhausted = typeof budget === "number" && budget > 0 && attempts >= budget;
   const repairLabel = !repair ? "NOT RUN" : repair.status === "TIMED_OUT" ? "TIMEOUT" : repair.status;
   const attackLabel = attack?.status ?? "NOT RUN";
-  const releaseLabel = releaseState === "pass" || releaseState === "waived" ? releaseState.toUpperCase() : "BLOCKED";
+  const releaseLabel = gateLabel(evaluateRelease(mission, fileExists));
   const attacks = (mission.attacks ?? []).map((item) => `<li>Attack attempt ${String(item.attempt)} ${escapeHtml(item.status)} ${escapeHtml(item.findings[0]?.id ?? "")}</li>`).join("");
   return `<h2>Lifecycle</h2><p>Review: <strong>${escapeHtml(review?.status ?? "NOT RUN")}</strong></p><p>Finding: ${escapeHtml(review?.findings[0]?.id ?? "none")}</p><p>Repair: <strong>${escapeHtml(repairLabel)}</strong></p><p>Retry Budget: <strong>${exhausted ? "EXHAUSTED" : escapeHtml(String(attempts))}</strong></p><p>Attack: <strong>${escapeHtml(attackLabel)}</strong></p><ul>${attacks}</ul><p>Release: <strong>${escapeHtml(releaseLabel)}</strong></p>`;
+}
+
+function renderEvidence(mission: Mission): string {
+  const records = mission.evidence.slice(-40);
+  if (records.length === 0) return "<li>No evidence yet.</li>";
+  return records
+    .map((record) => {
+      return `<li><details><summary>${escapeHtml(record.kind)} ${escapeHtml(record.result)}</summary><p>Type: ${escapeHtml(record.type)}</p><p>Source: ${escapeHtml(record.source)}</p><p>Command: ${escapeHtml(record.command)}</p><p>Timestamp: ${escapeHtml(record.timestamp)}</p><p>Status: ${escapeHtml(record.result)}</p><p>Artifact: ${escapeHtml(record.artifact ?? "none")}</p><p>Commit: ${escapeHtml(record.commit ?? "none")}</p><p>Runtime: ${escapeHtml(record.runtime ?? "none")}</p><p>Model: ${escapeHtml(record.model ?? "none")}</p></details></li>`;
+    })
+    .join("");
 }
 
 function renderRequirements(mission: Mission): string {
@@ -182,12 +209,12 @@ function renderRequirements(mission: Mission): string {
         })
         .join("");
       const proof = proofFor(requirement, mission)
-        .map((node) => `${escapeHtml(node.node)} ${node.state === "failed" ? "failed" : node.state}`)
+        .map((node) => `${escapeHtml(node.node)} ${node.state === "present" ? "PASS" : node.state === "failed" ? "FAIL" : node.state === "stale" ? "STALE" : "NOT_RUN"}`)
         .join(" → ");
-      const forRequirement = (kind: string) => mission.evidence.filter((record) => record.requirement_id === requirement.id && record.kind === kind);
+      const forRequirement = (kind: string) => mission.evidence.filter((record) => record.requirement_id === requirement.id && record.kind === kind && !evidenceIsStale(mission, record));
       const row = [
         requirementCoverage(requirement, mission),
-        `Implementation ${requirement.linked_artifacts.length > 0 ? "✅" : "⏳"}`,
+        `Implementation ${implementationLinks(requirement, mission).length > 0 ? "✅" : "⏳"}`,
         `Unit Test ${mark(forRequirement("unit"))}`,
         `Review ${mark(forRequirement("review"))}`,
         `Attack ${mark(forRequirement("attack"))}`,
@@ -195,7 +222,13 @@ function renderRequirements(mission: Mission): string {
         `Security ${mark(forRequirement("security"))}`,
         `NFR ${mark(forRequirement("nfr"))}`,
       ].join(" ");
-      return `<li><strong>${escapeHtml(requirement.id)}</strong><ul>${lines || "<li>No reviewed criteria yet.</li>"}</ul><p>${row}</p><p>Review: ${escapeHtml(review?.status ?? "NOT_RUN")}</p><p>${proof}</p></li>`;
+      const evidence = mission.evidence
+        .filter((record) => record.requirement_id === requirement.id)
+        .slice(-12)
+        .map((record) => `<li>${escapeHtml(record.kind)} ${escapeHtml(record.result)} ${escapeHtml(record.command)} ${escapeHtml(record.timestamp)} ${escapeHtml(record.artifact ?? "none")}</li>`)
+        .join("");
+      const acceptance = requirement.acceptance_criteria.map((criterion) => `<li>${escapeHtml(criterion)}</li>`).join("");
+      return `<li><details><summary><strong>${escapeHtml(requirement.id)}</strong> ${escapeHtml(requirement.title)}</summary><p>${escapeHtml(requirement.description)}</p><ul>${acceptance || "<li>No acceptance criteria yet.</li>"}</ul><ul>${lines || "<li>No reviewed criteria yet.</li>"}</ul><p>${row}</p><p>Review: ${escapeHtml(review?.status ?? "NOT_RUN")}</p><p>${proof}</p><ul>${evidence || "<li>No evidence yet.</li>"}</ul></details></li>`;
     })
     .join("");
 }
@@ -203,14 +236,16 @@ function renderRequirements(mission: Mission): string {
 function renderReleasePanel(mission: Mission): string {
   const matrix = releaseMatrix(mission, fileExists, mission.lastVerifiedBuild?.commit ?? null);
   const ready = matrix.current.every((row) => row.state === "PASS" || row.state === "NOT_REQUIRED");
+  const label = (state: string) => (state === "NOT_RUN" ? "NOT RUN YET" : state === "WAITING" ? "WAITING FOR APPROVAL" : state);
   const rows = matrix.current
     .map((row) => {
-      const mark = row.state === "PASS" ? "✅" : row.state === "NOT_REQUIRED" ? "—" : row.state === "FAIL" ? "❌" : "🔒";
-      return `<details><summary>${escapeHtml(row.label)} ${mark} ${escapeHtml(row.state)}</summary><p>Evidence: ${escapeHtml(row.evidence ?? "none")}</p><p>Timestamp: ${escapeHtml(row.timestamp ?? "none")}</p><p>Command: ${escapeHtml(row.command ?? "none")}</p><p>Artifact: ${escapeHtml(row.artifact ?? "none")}</p><p>Commit: ${escapeHtml(row.commit ?? "none")}</p><p>${escapeHtml(row.detail)}</p></details>`;
+      const mark = row.state === "PASS" ? "✅" : row.state === "NOT_REQUIRED" ? "—" : row.state === "FAIL" ? "❌" : row.state === "NOT_RUN" ? "⏳" : row.state === "WAITING" ? "✋" : "🔒";
+      return `<details><summary>${escapeHtml(row.label)} ${mark} ${escapeHtml(label(row.state))}</summary><p>Evidence: ${escapeHtml(row.evidence ?? "none")}</p><p>Timestamp: ${escapeHtml(row.timestamp ?? "none")}</p><p>Command: ${escapeHtml(row.command ?? "none")}</p><p>Artifact: ${escapeHtml(row.artifact ?? "none")}</p><p>Commit: ${escapeHtml(row.commit ?? "none")}</p><p>${escapeHtml(row.detail)}</p></details>`;
     })
     .join("");
   const history = matrix.historical.map((row) => `<li>${escapeHtml(row.label)} ${escapeHtml(row.state)} ${escapeHtml(row.timestamp ?? "")}</li>`).join("");
-  return `<h2>Release</h2>${rows}<p><strong>${ready ? "RELEASE READY" : "RELEASE BLOCKED"}</strong></p>${history ? `<h2>Superseded evidence</h2><ul>${history}</ul>` : ""}`;
+  const verified = mission.lastVerifiedBuild;
+  return `<h2>Release</h2>${rows}<p><strong>${ready ? "RELEASE READY" : "RELEASE BLOCKED"}</strong></p><p>Verified commit: ${escapeHtml(verified?.commit ?? "none")}</p><p>release.json: ${escapeHtml(verified ? "recorded with the release gate" : "not written")}</p><p>Approval history is listed under Release approval.</p>${history ? `<h2>Superseded evidence</h2><ul>${history}</ul>` : ""}`;
 }
 
 function renderSecurityPanel(mission: Mission): string {
@@ -262,7 +297,7 @@ function renderTraceabilityPanel(mission: Mission): string {
 function renderApprovalPanel(mission: Mission): string {
   const decisions = mission.approvals.filter((item) => item.category === "release");
   const latest = decisions.at(-1);
-  const status = latest?.decision === "approved" ? "APPROVED" : latest?.decision === "rejected" ? "REJECTED" : "WAITING FOR APPROVAL";
+  const status = latest?.decision === "approved" ? "APPROVED" : latest?.decision === "rejected" ? "REJECTED" : releaseApprovalRequired(mission) ? "WAITING FOR APPROVAL" : "NOT REQUIRED";
   const history = decisions.map((item) => `<li>${escapeHtml(item.decision)} by ${escapeHtml(item.identity)} at ${escapeHtml(item.at)}</li>`).join("");
   return `<h2>Release approval</h2><p>Status: <strong>${escapeHtml(status)}</strong></p><p>Approver: record it with <code>bmad-next release approve ${escapeHtml(mission.id)} --by "Name"</code></p><p>Decision: <code>bmad-next release approve</code> or <code>bmad-next release reject</code>. A click in this panel is not an approval.</p>${history ? `<ul>${history}</ul>` : ""}`;
 }

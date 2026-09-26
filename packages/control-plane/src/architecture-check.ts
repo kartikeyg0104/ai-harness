@@ -55,7 +55,9 @@ function technologiesOf(files: string[], dependencies: string[], root: string): 
 export function verifyArchitectureTree(input: { root: string; declared: ArchitectureDecision[]; timestamp: string }): ArchitectureVerification {
   const files: string[] = [];
   walk(input.root, input.root, files);
-  const dependencies = dependenciesOf(input.root);
+  // A layer can be its own package inside a monorepo; its package.json counts as well as the root's.
+  const layerRoots = input.declared.filter((item) => item.kind === "layer").map((item) => path.join(input.root, item.choice.split(":")[0] ?? item.choice));
+  const dependencies = [...new Set([input.root, ...layerRoots].flatMap((dir) => dependenciesOf(dir)))];
   const detectedTechnologies = technologiesOf(files, dependencies, input.root);
   const declaredComponents = input.declared.filter((item) => item.kind === "component" || item.kind === "layer" || item.kind === "ownership").map((item) => item.choice);
   const declaredTechnologies = input.declared.filter((item) => item.kind === "technology").map((item) => item.choice);

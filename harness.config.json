@@ -1,0 +1,9 @@
+{
+  "runtime": "opencode",
+  "provider": "nvidia",
+  "model": "openai/gpt-oss-20b",
+  "baseURL": "",
+  "temperature": 0,
+  "timeoutMs": 300000,
+  "workspaceDir": "workspace"
+}

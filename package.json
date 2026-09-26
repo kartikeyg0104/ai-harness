@@ -12,8 +12,12 @@
   ],
   "scripts": {
     "build": "npm run build -w @bmad-next/control-plane && npm run build -w @bmad-next/cli && npm run build -w bmad-next-vscode",
-    "test": "npm run build -w @bmad-next/control-plane && node --test packages/control-plane/dist/test/**/*.js",
-    "bmad-next": "node packages/cli/dist/main.js"
+    "test": "npm run build -w @bmad-next/control-plane && npm run build -w bmad-next-vscode && node --test packages/control-plane/dist/test/**/*.js packages/vscode/dist/test/**/*.js",
+    "bmad-next": "node packages/cli/dist/main.js",
+    "harness": "node packages/cli/dist/main.js harness"
+  },
+  "dependencies": {
+    "opencode-ai": "1.18.25"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

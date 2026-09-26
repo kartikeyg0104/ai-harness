@@ -1,7 +1,10 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { BmadControlPlane } from "@bmad-next/control-plane";
+import { BmadControlPlane, doctorBrief, formatMissionStatus } from "@bmad-next/control-plane";
 import type { Mission } from "@bmad-next/control-plane";
+import { demoCommand } from "./demo-command";
+import { harnessCommand } from "./harness-command";
 
 const root = process.cwd();
 const plane = new BmadControlPlane(root);
@@ -34,12 +37,19 @@ function summary(mission: Mission): unknown {
 function help(): void {
   print(`BMAD Next
 
+bmad-next harness [issue-url | text] [--yes] [--once]
 bmad-next doctor
 bmad-next mission create|list|show|resume|pause|cancel
+bmad-next status [mission-id]
+bmad-next run [mission-id]
+bmad-next autopilot [mission-id]
+bmad-next demo fresh|run|reset
+bmad-next test
 bmad-next next
 bmad-next forge answer|harden|kill
-bmad-next spec|prd|architecture|stories
+bmad-next spec|prd|ux|architecture|tea|stories
 bmad-next build <ticket>
+bmad-next test <ticket>
 bmad-next repair <ticket>
 bmad-next verify|review [ticket]|attack|security|browser|nfr
 bmad-next release [mission-id]
@@ -74,9 +84,33 @@ void (async () => {
     case "help":
       help();
       break;
-    case "doctor":
-      print(plane.doctor());
+    case "doctor": {
+      const checks = plane.doctor();
+      print(doctorBrief(checks));
+      print(checks);
       break;
+    }
+    case "demo":
+      await demoCommand(root, rest[0]);
+      break;
+    case "harness":
+      await harnessCommand(rest);
+      break;
+    case "run": {
+      const id = rest[0] ?? missionId();
+      const current = plane.mission(id);
+      const open = current.forge?.questions.filter((question) => !current.forge?.answered.includes(question.id)) ?? [];
+      if (open.length > 0) throw new Error(`Forge still has open questions: ${open.map((question) => question.id).join(", ")}`);
+      const pending = current.tickets.find((ticket) => current.plans.find((plan) => plan.ref === ticket.ref)?.status !== "built");
+      print(pending ? plane.executeTicket(id, pending.ref) : plane.recommend(id));
+      break;
+    }
+    case "autopilot": {
+      const result = await plane.autopilot(rest[0] ?? missionId(), { log: (line) => print(line) });
+      print(result);
+      if (result.status === "blocked") process.exitCode = 1;
+      break;
+    }
     case "mission":
       if (rest[0] === "create") print(summary(plane.createMission(rest.slice(1).join(" "))));
       else if (rest[0] === "list") print(plane.listMissions());
@@ -87,7 +121,7 @@ void (async () => {
       else print(summary(plane.mission()));
       break;
     case "status":
-      print(summary(plane.mission()));
+      print(formatMissionStatus(plane.mission(rest[0])));
       break;
     case "next":
       print(plane.recommend());
@@ -101,11 +135,24 @@ void (async () => {
     case "architecture":
       print(summary(plane.runSkill(missionId(), "bmad-architecture")));
       break;
+    case "ux":
+      print(summary(plane.runSkill(missionId(), "bmad-ux")));
+      break;
+    case "tea":
+      print(plane.tea(missionId()));
+      break;
+    case "test":
+      if (!rest[0]) {
+        const suite = spawnSync("npm", ["test"], { cwd: root, stdio: "inherit" });
+        if (suite.status !== 0) process.exitCode = suite.status ?? 1;
+      } else print(plane.verifyTicket(missionId(), rest[0]));
+      break;
     case "stories":
       print(summary(plane.stories(missionId())));
       break;
     case "verify":
-      if (rest[0]?.startsWith("REQ-")) print(await plane.verifyRequirement(missionId(), rest[0]));
+      if (rest[0]?.startsWith("msn_")) print(plane.inspectEvidence(rest[0]));
+      else if (rest[0]?.startsWith("REQ-")) print(await plane.verifyRequirement(missionId(), rest[0]));
       else if (rest[0]) print(plane.verifyTicket(missionId(), rest[0]));
       else print(summary(plane.verifyMission(missionId())));
       break;

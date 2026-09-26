@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { BMAD_METHOD_PIN } from "../catalog";
+import { testCommandRanTests } from "../quality";
 import { CommandModelRunner } from "../model-runner";
 import { WorktreeManager } from "../providers";
 import { BmadControlPlane } from "../plane";
@@ -11,6 +12,12 @@ import { renderMissionControl } from "../render";
 import { processRunner } from "../runner";
 import { DeterministicTestRuntime, OpenCodeAdapter, classifyOpenCodeRun, type AgentContext, type AgentRun, type AgentRuntime } from "../runtime";
 import type { CommandRunner } from "../types";
+
+test("a test command that reports zero tests did not run a test", () => {
+  assert.equal(testCommandRanTests("ℹ tests 0\nℹ pass 0\n"), false);
+  assert.equal(testCommandRanTests("# tests 0\n# pass 0\n"), false);
+  assert.equal(testCommandRanTests("ℹ tests 1\nℹ pass 1\n"), true);
+});
 
 function tempProject(): string {
   const base = path.resolve(__dirname, "../../../../.tmp");
@@ -547,15 +554,34 @@ test("opencode completion is step_finish stop, not a file change or a bare exit 
     },
   });
   const timed = adapter.begin({ missionId: "m", ticketRef: "1.1", agent: "Developer", cwd, prompt: "fix" });
+  assert.match(calls[0]?.args.at(-1) ?? "", /index\.html/);
   assert.equal(timed.status, "timeout");
   assert.equal(timed.phase, "TIMED_OUT");
   assert.equal(timed.changedFiles?.includes("src/health.js"), true);
   assert.match(calls[0]?.args.join(" ") ?? "", /--format json/);
-  assert.match(calls[0]?.env?.OPENCODE_CONFIG_CONTENT ?? "", /"steps":6/);
+  assert.match(calls[0]?.env?.OPENCODE_CONFIG_CONTENT ?? "", /"steps":20/);
   const stop = '{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}';
   assert.equal(classifyOpenCodeRun({ exitCode: 0, timedOut: false, stdout: stop }).status, "completed");
   assert.equal(classifyOpenCodeRun({ exitCode: 0, timedOut: false, stdout: stop }).completionSignal, "process-exit");
   assert.equal(classifyOpenCodeRun({ exitCode: null, timedOut: true, stdout: stop }).completionSignal, "terminal-event");
   assert.equal(classifyOpenCodeRun({ exitCode: 0, timedOut: false, stdout: "done" }).status, "failed");
   assert.equal(classifyOpenCodeRun({ exitCode: null, timedOut: true, stdout: '{"type":"step_finish","part":{"reason":"tool-calls"}}' }).status, "timeout");
+});
+
+test("OpenCode retries once when its database is locked", () => {
+  const cwd = path.join(tempProject(), ".bmad-next", "worktrees", "m", "1.1");
+  fs.mkdirSync(cwd, { recursive: true });
+  let runs = 0;
+  const adapter = new OpenCodeAdapter({
+    which: () => "/usr/bin/opencode",
+    run: (command) => {
+      if (command !== "opencode") return { exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      runs += 1;
+      if (runs === 1) return { exitCode: 1, stdout: "", stderr: "Error: Unexpected error\n\ndatabase is locked", durationMs: 2, timedOut: false };
+      return { exitCode: 0, stdout: '{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}', stderr: "", durationMs: 3, timedOut: false };
+    },
+  });
+  const result = adapter.begin({ missionId: "m", ticketRef: "1.1", agent: "Developer", cwd, prompt: "fix" });
+  assert.equal(runs, 2);
+  assert.equal(result.status, "completed");
 });

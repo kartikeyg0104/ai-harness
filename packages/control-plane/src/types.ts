@@ -7,6 +7,7 @@ export type CapabilityStatus =
   | "not-configured"
   | "blocked"
   | "not-available"
+  | "configured"
   | "experimental";
 export type LoopState =
   | "draft"
@@ -136,6 +137,11 @@ export type EventType =
   | "NfrStarted"
   | "NfrCompleted"
   | "NfrFailed"
+  | "ArchitectureDeclared"
+  | "PolicyTightened"
+  | "RepairCompleted"
+  | "AutopilotStarted"
+  | "AutopilotStopped"
   | "ArchitectureVerificationStarted"
   | "ArchitectureVerificationCompleted"
   | "TraceabilityChecked"
@@ -145,7 +151,8 @@ export type EventType =
   | "ReleaseGateEvaluated"
   | "SkillCandidateCreated"
   | "PluginInstalled"
-  | "PluginDisabled";
+  | "PluginDisabled"
+  | "PluginRolledBack";
 
 export interface DomainEvent {
   id: string;
@@ -175,6 +182,8 @@ export interface ForgeLock {
   key: string;
   text: string;
   at: string;
+  /** Who supplied the text. Model-proposed answers are recorded as assumptions a person can revise. */
+  source?: "user" | "model";
 }
 
 export interface ForgeSession {
@@ -498,6 +507,7 @@ export interface JourneyDeclaration {
 }
 
 export interface Mission {
+  schemaVersion?: number;
   id: string;
   title: string;
   input: string;
@@ -540,6 +550,10 @@ export interface Mission {
   repairs: RepairRecord[];
   attacks: AttackRecord[];
   attackRiskFloor?: "medium" | "high";
+  /** Human gates in force when the mission was created (ControlConfig.humanGates). */
+  humanGates?: string[];
+  /** Evidence kinds the project requires on top of the risk-based set (ControlConfig.requiredEvidence). */
+  requiredEvidence?: string[];
   waivers: Waiver[];
   projectContext: ProjectContext;
 }
@@ -573,6 +587,8 @@ export interface TicketExecution {
   phase?: "STARTING" | "RUNNING" | "EDITING" | "VERIFYING" | "COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELLED";
   phases?: Array<"STARTING" | "RUNNING" | "EDITING" | "VERIFYING" | "COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELLED">;
   retryBudget?: number;
+  /** Raw runtime transcript of the latest build or repair run. */
+  runtimeLog?: string;
 }
 
 export interface DispatchRecord {
@@ -616,6 +632,8 @@ export interface ControlConfig {
   attacker: BmadRunnerConfig | null;
   attackRiskFloor: "medium" | "high";
   browserOrigins: string[];
+  /** Evidence kinds every mission must pass regardless of risk, e.g. ["unit","review","attack","browser","security","nfr"]. */
+  requiredEvidence?: string[];
 }
 
 export interface BmadRunnerConfig {
@@ -633,6 +651,8 @@ export interface BmadRunResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  /** Why the output did or did not meet the skill contract. */
+  reason?: string;
   artifactPath?: string;
   durationMs?: number;
 }
@@ -705,6 +725,8 @@ export interface ReviewRecord {
     severity: "info" | "low" | "medium" | "high" | "critical";
   }>;
   summary: string;
+  rawOutput?: string;
+  unclear?: string[];
   durationMs: number | null;
   modelCost: number | null;
   falsePositiveFeedback: number;
@@ -729,7 +751,7 @@ export interface RepairRecord {
   ticketRef: string;
   status: "STARTING" | "RUNNING" | "EDITING" | "COMPLETED" | "FAILED" | "TIMED_OUT" | "CANCELLED";
   findingIds: string[];
-  source: "review" | "attack" | "security";
+  source: "review" | "attack" | "security" | "tests";
   worktree: string;
   startedAt: string;
   endedAt: string;
@@ -755,6 +777,7 @@ export interface AttackRecord {
   exitCode: number | null;
   startedAt: string;
   endedAt: string;
+  rawOutput?: string;
 }
 
 export const LOOP_TRANSITIONS: Record<LoopState, LoopState[]> = {

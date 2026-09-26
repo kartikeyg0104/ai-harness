@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import test from "node:test";
 import { BmadControlPlane } from "../plane";
 import { ExternalCliAdapter } from "../runtime";
 import { appendTrace, openHandsSdkStatus, serviceStatuses } from "../platform";
+import { acpInitialize, diagnoseCiLog, readAgentCard, textualSymbols, upstreamModule } from "../integrations";
+import { executeBrowserScenario } from "../browser-runner";
+import { proofFor } from "../quality";
+import { loadMission } from "../store";
 import type { CommandRunner } from "../types";
 
 function tempProject(): string {
@@ -140,10 +145,112 @@ test("import rejects a payload without a mission id and traces redact secrets", 
   const root = tempProject();
   const plane = new BmadControlPlane(root);
   assert.throws(() => plane.importMission("{}"), /id/);
-  const created = plane.createMission("Add a health check.");
+  const created = plane.createMission("token sk-live-supersecretvalue");
   const timeline = plane.timeline(created.id);
   assert.equal(timeline.some((item) => item.type === "MissionCreated"), true);
   appendTrace(root, { missionId: created.id, type: "ToolCalled", at: "2026-09-26T00:00:00.000Z", data: { token: "sk-live-supersecretvalue" } });
   const trace = fs.readFileSync(path.join(root, ".bmad-next", "traces.jsonl"), "utf8");
   assert.equal(trace.includes("sk-live-supersecretvalue"), false);
+  const exported = plane.exportMission(created.id);
+  assert.equal(exported.includes("sk-live-supersecretvalue"), false);
+});
+
+test("plugin update keeps the previous version for rollback", () => {
+  const root = tempProject();
+  const plane = new BmadControlPlane(root);
+  const manifest = {
+    id: "tea-local",
+    version: "1.0.0",
+    source: "https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise",
+    license: "MIT",
+    tools: ["risk"],
+    permissions: { read: true, write: false, execute: false, network: false, credentials: false, filesystem: [".bmad-next"] },
+  };
+  plane.addPlugin(manifest);
+  plane.updatePlugin({ ...manifest, version: "1.1.0" });
+  assert.equal(plane.plugins()[0]?.version, "1.1.0");
+  assert.equal(plane.rollbackPlugin("tea-local").version, "1.0.0");
+  assert.throws(() => plane.rollbackPlugin("tea-local"), /no previous/);
+});
+
+test("stale evidence is visible on the proof graph and does not count as verified", () => {
+  const root = tempProject();
+  const plane = new BmadControlPlane(root);
+  const mission = plane.createMission("Build an expense-management SaaS.");
+  answerAll(plane, mission.id);
+  plane.answerForge(mission.id, "harden");
+  const artifact = path.join(root, "unit.log");
+  fs.writeFileSync(artifact, "ok");
+  plane.recordEvidence(mission.id, {
+    requirement_id: "REQ-001",
+    result: "pass",
+    kind: "unit",
+    runner: "process",
+    started_at: "2026-09-26T00:00:00.000Z",
+    finished_at: "2026-09-26T00:00:01.000Z",
+    exit_code: 0,
+    command: "node test.js",
+    artifact,
+  });
+  plane.correctCourse(mission.id, "REQ-001", "A changed rule.", "policy");
+  const current = plane.mission(mission.id);
+  const proof = proofFor(current.requirements[0]!, current);
+  assert.equal(proof.find((node) => node.node === "Tests")?.state, "stale");
+  assert.equal(plane.mission(mission.id).schemaVersion, 1);
+  const raw = JSON.parse(fs.readFileSync(path.join(root, ".bmad-next", "missions", mission.id, "mission.json"), "utf8")) as { schemaVersion?: number };
+  delete raw.schemaVersion;
+  fs.writeFileSync(path.join(root, ".bmad-next", "missions", mission.id, "mission.json"), JSON.stringify(raw));
+  assert.equal(loadMission(root, mission.id).schemaVersion, 1);
+});
+
+test("upstream modules, ACP, A2A, and CI push stay fail-closed", async () => {
+  const runner: CommandRunner = { which: () => null, run: () => { throw new Error("not called"); } };
+  assert.equal(upstreamModule(runner, "loop", [], tempProject()).status, "NOT_CONFIGURED");
+  assert.equal(acpInitialize(undefined, [], tempProject()).status, "NOT_CONFIGURED");
+  const root = tempProject();
+  const script = path.join(root, "acp.js");
+  fs.writeFileSync(script, "let buf=''; process.stdin.on('data', (chunk) => { buf += chunk; }); process.stdin.on('end', () => { const msg = JSON.parse(buf.trim().split('\\n')[0]); process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.method === 'initialize' ? 1 : 0 } }) + '\\n'); });\n");
+  assert.equal(acpInitialize(process.execPath, [script], root).status, "COMPLETED");
+  assert.equal((await readAgentCard(undefined)).status, "NOT_CONFIGURED");
+  const card = await readAgentCard("http://agents.example", async () => new Response(JSON.stringify({ name: "tea", url: "http://agents.example" }), { status: 200 }));
+  assert.equal(card.status, "COMPLETED");
+  const invalid = await readAgentCard("http://agents.example", async () => new Response("{}", { status: 200 }));
+  assert.equal(invalid.status, "INVALID");
+  const diagnosis = diagnoseCiLog("npm error code 1\nerror TS2322: bad\n");
+  assert.equal(diagnosis.push, "NOT_CONFIGURED");
+  assert.equal(diagnosis.failures.length, 2);
+  const symbols = textualSymbols(root);
+  assert.equal(symbols.kind, "textual");
+});
+
+test("a failed selector can heal to one named control without changing the assertion", { timeout: 60000 }, async () => {
+  const html = `<!doctype html><button>Check</button><p id="error"></p><script>document.querySelector("button").onclick=()=>{document.getElementById("error").textContent="invalid health input";}</script>`;
+  const server = http.createServer((_request, response) => {
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(html);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const root = tempProject();
+  const result = await executeBrowserScenario({
+    scenario: {
+      id: "BROWSER-HEAL",
+      requirementId: "REQ-001",
+      name: "Heal",
+      startUrl: `http://127.0.0.1:${port}/`,
+      steps: [
+        { action: "navigate", target: `http://127.0.0.1:${port}/`, name: "open" },
+        { action: "click", target: "#missing", name: "Check" },
+      ],
+      assertions: [{ kind: "text", target: "#error", expected: "invalid health input" }],
+    },
+    evidenceDir: path.join(root, "browser"),
+    timeoutMs: 15000,
+    viewport: { width: 1280, height: 720 },
+  }, new Date().toISOString());
+  server.close();
+  assert.equal(result.steps.find((step) => step.action === "click")?.status, "healed");
+  assert.equal(result.assertions[0]?.status, "PASS");
+  assert.equal(result.status, "PASS");
 });

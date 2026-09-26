@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import type { CommandResult, CommandRunner } from "./types";
 
 function timedOut(error: Error | undefined): boolean {
@@ -20,7 +21,8 @@ export const processRunner: CommandRunner = {
       encoding: "utf8",
       timeout: timeoutMs,
       killSignal: "SIGTERM",
-      env: env ? { ...process.env, ...env } : process.env,
+      // PWD must match cwd: OpenCode reads its working directory from the inherited PWD, not from the process cwd.
+      env: { ...process.env, ...env, PWD: path.resolve(cwd) },
     });
     return {
       exitCode: result.status,

@@ -70,6 +70,8 @@ const WORKFLOWS: Record<Complexity, string[]> = {
     "bmad-forge-idea",
     "bmad-spec",
     "bmad-prd",
+    // The release gate verifies declared architecture for every mission, so medium work must declare it.
+    "bmad-architecture",
     "bmad-preview-ticketing",
     "bmad-build",
     "bmad-code-review",

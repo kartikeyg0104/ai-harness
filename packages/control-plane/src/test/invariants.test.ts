@@ -55,7 +55,8 @@ test("expense mission selects the critical BMAD workflow and does not verify its
   assert.equal(release.state, "blocked");
   assert.equal(release.lastVerifiedBuild, null);
   const html = renderMissionControl(plane.mission(mission.id));
-  assert.match(html, /blocked/);
+  assert.match(html, /IN PROGRESS \(\d+ checks not run yet\)/);
+  assert.match(html, /not run yet/);
   assert.doesNotMatch(html, /RELEASE READY/);
 });
 
@@ -296,6 +297,11 @@ test("release can pass only after recorded runs, architecture, traceability, and
   const traced = plane.mission(created.id);
   if (traced.requirements[0]) traced.requirements[0].acceptance_criteria = ["An expense can be recorded and verified."];
   saveMission(root, traced);
+  plane.verifyTraceability(created.id);
+  assert.match(fs.readFileSync(path.join(root, ".bmad-next", "evidence", created.id, "traceability.json"), "utf8"), /REQ-001 implementation/);
+  const built = plane.mission(created.id);
+  built.plans.push({ ref: "1.1", status: "built", baseline_revision: null, blocked_reason: null, body: "", version: 1 });
+  saveMission(root, built);
   plane.verifyArchitecture(created.id);
   plane.verifyTraceability(created.id);
   plane.approve(created.id, "release", "ada", "Reviewed the evidence files.");

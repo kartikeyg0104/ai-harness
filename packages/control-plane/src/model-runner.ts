@@ -33,6 +33,35 @@ export function redactSecrets(value: string): string {
     .replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[=:]\s*)(\S+)/gi, "$1[redacted]");
 }
 
+/**
+ * The last complete JSON object printed to stdout. A coding CLI prints the model's intermediate text before its
+ * final reply, so the contract object is the last one. It still has to match the contract and name files that exist.
+ */
+export function lastJsonObject(text: string): Record<string, unknown> | null {
+  const clean = text.replace(/\u001b\[[0-9;]*m/g, "");
+  for (let end = clean.lastIndexOf("}"); end >= 0; end = clean.lastIndexOf("}", end - 1)) {
+    let depth = 0;
+    let inString = false;
+    for (let index = end; index >= 0; index -= 1) {
+      const char = clean[index];
+      if (char === '"' && clean[index - 1] !== "\\") inString = !inString;
+      if (inString) continue;
+      if (char === "}") depth += 1;
+      else if (char === "{") depth -= 1;
+      if (depth === 0) {
+        try {
+          const parsed: unknown = JSON.parse(clean.slice(index, end + 1));
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+        } catch {
+          // Not a complete object here; try an earlier closing brace.
+        }
+        break;
+      }
+    }
+  }
+  return null;
+}
+
 export function parseRunnerArgs(raw: string | undefined): string[] {
   const text = (raw ?? "").trim();
   if (!text) return [];

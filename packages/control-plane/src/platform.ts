@@ -81,14 +81,18 @@ export function runMutation(runner: CommandRunner, file: string, command: string
   }
 }
 
-export function runChaos(runner: CommandRunner, scenario: "timeout" | "dependency-failure", command: string, args: string[], cwd: string): { scenario: string; timedOut: boolean; exitCode: number | null; detail: string } {
+export function runChaos(runner: CommandRunner, scenario: "timeout" | "dependency-failure" | "database-failure" | "network-failure" | "duplicate" | "partial", command: string, args: string[], cwd: string): { scenario: string; timedOut: boolean; exitCode: number | null; exits?: Array<number | null>; detail: string } {
   const timeout = scenario === "timeout" ? 50 : 8000;
-  const result = runner.run(command, args, cwd, timeout);
+  const first = runner.run(command, args, cwd, timeout);
+  if (scenario === "duplicate") {
+    const second = runner.run(command, args, cwd, timeout);
+    return { scenario, timedOut: first.timedOut || second.timedOut, exitCode: second.exitCode, exits: [first.exitCode, second.exitCode], detail: "The command ran twice. Both exits are recorded." };
+  }
   return {
     scenario,
-    timedOut: result.timedOut,
-    exitCode: result.exitCode,
-    detail: result.timedOut ? "The process hit the chaos timeout." : `The process exited ${String(result.exitCode)}.`,
+    timedOut: first.timedOut,
+    exitCode: first.exitCode,
+    detail: first.timedOut ? "The process hit the chaos timeout." : `The process exited ${String(first.exitCode)}.`,
   };
 }
 

@@ -81,7 +81,7 @@ An attack `FAIL` becomes a repair in the same worktree. The repair prompt includ
 
 Steps are `navigate`, `click`, `fill`, `select`, `wait`, and `screenshot`. Assertions are `visible`, `text`, `url`, `attribute`, and `count`. Navigation is allowed only for configured origins, by default `http://127.0.0.1` and `http://localhost`. An empty origin list fails closed. `file:` URLs and other hosts are refused, and `observe` autonomy blocks the command. Evidence is `.bmad-next/evidence/<mission>/<scenario>.json` plus screenshots. A pass needs the browser to have launched, the scenario to have executed, every assertion to pass, and at least one screenshot file on disk. A timeout stays `TIMEOUT` and does not become a pass. Events are `BrowserStarted`, `BrowserStepStarted`, `BrowserStepCompleted`, `BrowserCompleted`, and `BrowserFailed`. `BrowserStarted` is not emitted when the scenario is invalid, the origin is refused, or Playwright is not available.
 
-`deterministic-test-browser` is constructed only by tests. A pass from that provider without screenshot files is rejected. Selector self-healing and visual diff are not implemented. The stored visual record is the screenshot, viewport, URL, scenario, and timestamp.
+`deterministic-test-browser` is constructed only by tests. A pass from that provider without screenshot files is rejected. A failed click may retry one uniquely named control. The assertion text is unchanged. Viewport screenshots are stored when Chromium launches. The stored visual record is the screenshot, viewport, URL, scenario, and timestamp.
 
 ## Security
 

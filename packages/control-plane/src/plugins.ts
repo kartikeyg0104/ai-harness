@@ -22,19 +22,20 @@ export interface PluginManifest {
 export interface PluginRecord extends PluginManifest {
   enabled: boolean;
   installedAt: string;
+  previous: PluginManifest[];
 }
 
 export function listPlugins(root: string): PluginRecord[] {
   const file = pluginFile(root);
   if (!fs.existsSync(file)) return [];
   const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { plugins?: PluginRecord[] };
-  return parsed.plugins ?? [];
+  return (parsed.plugins ?? []).map((plugin) => ({ ...plugin, previous: plugin.previous ?? [] }));
 }
 
 export function installPlugin(root: string, manifest: PluginManifest, at: string): PluginRecord {
   validateManifest(manifest);
   const plugins = listPlugins(root).filter((item) => item.id !== manifest.id);
-  const record: PluginRecord = { ...manifest, tools: [...manifest.tools], permissions: { ...manifest.permissions, filesystem: [...manifest.permissions.filesystem] }, enabled: false, installedAt: at };
+  const record: PluginRecord = { ...manifest, tools: [...manifest.tools], permissions: { ...manifest.permissions, filesystem: [...manifest.permissions.filesystem] }, enabled: false, installedAt: at, previous: [] };
   plugins.push(record);
   writePlugins(root, plugins);
   return record;
@@ -45,6 +46,37 @@ export function setPluginEnabled(root: string, id: string, enabled: boolean): Pl
   const plugin = plugins.find((item) => item.id === id);
   if (!plugin) throw new Error(`Plugin ${id} is not installed.`);
   plugin.enabled = enabled;
+  writePlugins(root, plugins);
+  return plugin;
+}
+
+export function updatePlugin(root: string, manifest: PluginManifest, at: string): PluginRecord {
+  validateManifest(manifest);
+  const plugins = listPlugins(root);
+  const plugin = plugins.find((item) => item.id === manifest.id);
+  if (!plugin) throw new Error(`Plugin ${manifest.id} is not installed.`);
+  plugin.previous.push({ id: plugin.id, version: plugin.version, source: plugin.source, license: plugin.license, tools: [...plugin.tools], permissions: { ...plugin.permissions, filesystem: [...plugin.permissions.filesystem] } });
+  plugin.version = manifest.version;
+  plugin.source = manifest.source;
+  plugin.license = manifest.license;
+  plugin.tools = [...manifest.tools];
+  plugin.permissions = { ...manifest.permissions, filesystem: [...manifest.permissions.filesystem] };
+  plugin.installedAt = at;
+  writePlugins(root, plugins);
+  return plugin;
+}
+
+export function rollbackPlugin(root: string, id: string): PluginRecord {
+  const plugins = listPlugins(root);
+  const plugin = plugins.find((item) => item.id === id);
+  if (!plugin) throw new Error(`Plugin ${id} is not installed.`);
+  const prior = plugin.previous.pop();
+  if (!prior) throw new Error(`Plugin ${id} has no previous version.`);
+  plugin.version = prior.version;
+  plugin.source = prior.source;
+  plugin.license = prior.license;
+  plugin.tools = [...prior.tools];
+  plugin.permissions = { ...prior.permissions, filesystem: [...prior.permissions.filesystem] };
   writePlugins(root, plugins);
   return plugin;
 }

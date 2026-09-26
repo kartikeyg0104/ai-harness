@@ -35,10 +35,10 @@ import {
 } from "./collaboration";
 import { runDoctor } from "./doctor";
 import { authorizeAgent, decideCommand } from "./policy";
-import { coverage, evaluateRelease, fileExists, missionEvidenceKinds, partitionEvidence, proofFor, releaseMatrix, requiredEvidenceKinds, assertPassEvidence, requirementVerified } from "./quality";
+import { coverage, detectEdgeCaseTests, failingTestSummary, evaluateRelease, fileExists, missionEvidenceKinds, requirementKinds, partitionEvidence, proofFor, releaseMatrix, requiredEvidenceKinds, assertPassEvidence, requirementVerified, testCommandRanTests } from "./quality";
 import { parseIntent, type Intent } from "./intent";
 import { processRunner } from "./runner";
-import { activeMissionId, appendEvent, ensureHome, listMissionIds, loadMission, readConfig, readEvents, saveMission, writeConfig } from "./store";
+import { acquireAutopilotLock, activeMissionId, appendEvent, ensureHome, listMissionIds, loadMission, readConfig, readEvents, releaseAutopilotLock, saveMission, writeConfig } from "./store";
 import { assertTomlHasNoStatus, renderTicketTree } from "./tickets";
 import type {
   AgentContract,
@@ -80,8 +80,12 @@ import type {
   Waiver,
 } from "./types";
 import { LOOP_TRANSITIONS, emptyBrain, emptyContext } from "./types";
-import { redactSecrets } from "./model-runner";
-import { BmadRunner, resolveRunnerConfig, resolveRuntimeId } from "./skill-runner";
+import { CommandModelRunner, redactSecrets } from "./model-runner";
+import { runAutopilot, type AutopilotHooks, type AutopilotResult } from "./autopilot";
+import { PREVIEW_MARKER, previewDir, startPreview, withPreview, type PreviewServer } from "./preview";
+import { PLAN_PROMPT_VERSION, appSource, parsePlan, planPrompt } from "./verification-plan";
+import { extractJson } from "./reviewer";
+import { BmadRunner, installedSkillPath, readArchitectureDeclarations, resolveRunnerConfig, resolveRuntimeId } from "./skill-runner";
 import {
   CommandReviewer,
   REVIEW_PROMPT_VERSION,
@@ -97,6 +101,7 @@ import {
   CommandAttacker,
   downgradeAttack,
   resolveAttackerConfig,
+  applyAttackSurface,
   type AttackContext,
   type AttackResult,
   type AttackRunner,
@@ -104,7 +109,9 @@ import {
 import { PlaywrightBrowser, probePlaywright, seal, validateScenario, type BrowserProvider, type BrowserResult, type BrowserScenario } from "./browser";
 import { RuntimeRegistry, type AgentRuntime } from "./runtime";
 import { appendTrace, missionTimeline, openHandsSdkStatus, runChaos, runMutation, serviceStatuses, updateFileIndex } from "./platform";
-import { installPlugin, listPlugins, removePlugin, setPluginEnabled, type PluginManifest, type PluginRecord } from "./plugins";
+import { installPlugin, listPlugins, removePlugin, rollbackPlugin as restorePlugin, setPluginEnabled, updatePlugin as replacePlugin, type PluginManifest, type PluginRecord } from "./plugins";
+import { acpInitialize, diagnoseCiLog, readAgentCard, textualSymbols, toolProbe, upstreamModule } from "./integrations";
+import { captureViewports } from "./browser-runner";
 import { BmadLoopRunner } from "./loop-runner";
 import { BmadResearchProvider, DockerSandboxProvider, LocalSandboxProvider, WorktreeManager, builderDraft, repositoryIntelligence, retrospectiveBrief, teaBrief, type BuilderKind, type ResearchClaim } from "./providers";
 import { verifyArchitectureTree } from "./architecture-check";
@@ -133,6 +140,55 @@ export interface PlaneOptions {
   browser?: BrowserProvider;
   security?: SecurityScanner;
   nfr?: NfrScanner;
+}
+
+/**
+ * The package whose tests cover a change: the nearest directory with a package.json test script
+ * that contains every changed file. A monorepo root is used only when the change reaches it.
+ */
+export function testPackageDir(worktree: string, changedFiles: string[]): string {
+  const root = path.resolve(worktree);
+  const dirs = changedFiles
+    .map((file) => (file.endsWith("/") ? path.resolve(root, file) : path.dirname(path.resolve(root, file))))
+    .filter((dir) => dir === root || dir.startsWith(root + path.sep));
+  if (dirs.length === 0) return root;
+  let common = dirs[0] ?? root;
+  for (const dir of dirs.slice(1)) {
+    while (common !== root && !(dir === common || dir.startsWith(common + path.sep))) common = path.dirname(common);
+  }
+  for (let dir = common; ; dir = path.dirname(dir)) {
+    const manifest = path.join(dir, "package.json");
+    if (fs.existsSync(manifest)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(manifest, "utf8")) as { scripts?: { test?: unknown } };
+        if (typeof parsed.scripts?.test === "string" && parsed.scripts.test.trim()) return dir;
+      } catch {
+        return dir;
+      }
+    }
+    if (dir === root || !dir.startsWith(root)) return root;
+  }
+}
+
+/**
+ * Files a coding CLI reports writing in its tool log (OpenCode prints "← Write path" and "← Edit path"), relative to
+ * the project root. Null when the output has no recognisable tool log, so the caller cannot attribute writes.
+ */
+export function runnerWrites(transcript: string, root: string): Set<string> | null {
+  const clean = transcript.replace(/\u001b\[[0-9;]*m/g, "");
+  if (!/^\s*[←✱✗$→]\s/m.test(clean)) return null;
+  const files = new Set<string>();
+  for (const match of clean.matchAll(/^\s*[←→]\s*(?:Write|Edit|Patch|MultiEdit)\s+(\S.*?)\s*$/gm)) {
+    const target = match[1] ?? "";
+    const relative = path.isAbsolute(target) ? path.relative(root, target) : target;
+    if (!relative.startsWith("..")) files.add(relative.split(path.sep).join("/"));
+  }
+  return files;
+}
+
+/** A recorded human decision needs something that reads as a name: at least two letters, not just punctuation. */
+export function namedPerson(identity: string): boolean {
+  return (identity.match(/\p{L}/gu) ?? []).length >= 2;
 }
 
 export class BmadControlPlane {
@@ -171,6 +227,7 @@ export class BmadControlPlane {
     const workflow = selectWorkflow(complexity, mode);
     const stamp = this.now().toISOString();
     const mission: Mission = {
+      schemaVersion: 1,
       id: `msn_${this.id()}`,
       title: text.slice(0, 120),
       input: text,
@@ -222,6 +279,8 @@ export class BmadControlPlane {
       securityRuns: [],
       nfrRuns: [],
       attackRiskFloor: readConfig(this.root).attackRiskFloor ?? "high",
+      humanGates: [...readConfig(this.root).humanGates],
+      requiredEvidence: [...(readConfig(this.root).requiredEvidence ?? [])],
       waivers: [],
       projectContext: emptyContext(),
     };
@@ -275,6 +334,70 @@ export class BmadControlPlane {
     return mission;
   }
 
+  /**
+   * Lets the configured model runner answer the open forge questions from the mission idea (the headless use of
+   * bmad-forge-idea). Each answer is recorded as a model-proposed assumption, visible and revisable, never as the
+   * person's own statement. A missing runner or unusable output leaves the questions open.
+   */
+  proposeForgeAnswers(missionId: string): { status: "answered" | "blocked" | "not-configured"; reason: string; answered: string[] } {
+    const mission = this.must(missionId);
+    if (!mission.forge || mission.forge.outcome !== "active") return { status: "blocked", reason: "No active forge session.", answered: [] };
+    const open = mission.forge.questions.filter((question) => !mission.forge?.answered.includes(question.id));
+    if (open.length === 0) return { status: "answered", reason: "No forge question is open.", answered: [] };
+    const runnerConfig = resolveRunnerConfig(readConfig(this.root));
+    if (!runnerConfig) return { status: "not-configured", reason: "No model runner is configured, so a person must answer the forge questions.", answered: [] };
+    const installed = installedSkillPath(this.root, "bmad-forge-idea");
+    const prompt = [
+      "You are running bmad-forge-idea headlessly for a product idea. Answer each forge question from the idea alone.",
+      installed ? `Installed upstream skill for method guidance: ${path.join(this.root, installed)}` : "",
+      "Keep each answer to one or two concrete sentences that a test could check. Choose the smallest reasonable scope.",
+      "The success answer must name an observable check for every capability the idea mentions; do not drop any of them.",
+      "Do not write any files. Reply with one JSON object and no other text.",
+      `Idea: ${mission.input}`,
+      "Questions, each with its id:",
+      ...open.map((question) => `- id "${question.id}": ${question.prompt} (${question.why})`),
+      "Fill in this JSON, keeping each id exactly as written:",
+      JSON.stringify({ answers: open.map((question) => ({ id: question.id, answer: "..." })) }),
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
+    const scratch = path.join(this.root, ".bmad-next", "missions", mission.id, "forge-cwd");
+    fs.mkdirSync(scratch, { recursive: true });
+    this.emit(mission, "SkillStarted", { skillId: "bmad-forge-idea", mode: "headless-answers", command: runnerConfig.command });
+    const result = new CommandModelRunner(this.runner, runnerConfig, this.root).runSync({ skillId: "bmad-forge-idea", prompt, input: "", cwd: scratch, timeoutMs: runnerConfig.timeoutMs ?? 120000 });
+    const evidence = path.join(this.root, ".bmad-next", "missions", mission.id, "artifacts", "forge-proposal.json");
+    fs.mkdirSync(path.dirname(evidence), { recursive: true });
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = result.status === "completed" ? extractJson(result.stdout) : null;
+    } catch {
+      parsed = null;
+    }
+    const proposals = Array.isArray(parsed?.answers) ? (parsed?.answers as unknown[]).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
+    // Answers numbered exactly 1..n, one per open question, map by position; any other id must match exactly.
+    const positional = proposals.length === open.length && proposals.every((item, index) => String(item.id) === String(index + 1));
+    const answered: string[] = [];
+    for (const [index, question] of open.entries()) {
+      const found = positional ? proposals[index] : proposals.find((item) => item.id === question.id);
+      const text = typeof found?.answer === "string" ? found.answer.trim().slice(0, 600) : "";
+      if (!text) continue;
+      mission.forge.answered.push(question.id);
+      mission.forge.locks.push({ kind: "assumption", key: question.id, text, at: this.now().toISOString(), source: "model" });
+      this.emit(mission, "ForgeAnswered", { key: question.id, by: "model", command: runnerConfig.command });
+      answered.push(question.id);
+    }
+    const left = open.filter((question) => !answered.includes(question.id)).map((question) => question.id);
+    fs.writeFileSync(
+      evidence,
+      JSON.stringify({ skill: "bmad-forge-idea", runner: runnerConfig.command, model: runnerConfig.model ?? null, status: result.status, exitCode: result.exitCode, durationMs: result.durationMs ?? null, answered, left, raw: redactSecrets(result.stdout).slice(-20000) }, null, 2),
+    );
+    this.emit(mission, left.length > 0 ? "SkillFailed" : "SkillCompleted", { skillId: "bmad-forge-idea", mode: "headless-answers", status: left.length > 0 ? `unanswered: ${left.join(", ")}` : "completed", answered });
+    this.touch(mission);
+    saveMission(this.root, mission);
+    if (left.length > 0) return { status: "blocked", reason: `The model runner left forge question(s) unanswered: ${left.join(", ")} (${result.status}).`, answered };
+    return { status: "answered", reason: `Model proposed answers for ${answered.join(", ")}. They are recorded as assumptions.`, answered };
+  }
+
   proposeTickets(missionId: string): Mission {
     const mission = this.must(missionId);
     if (mission.requirements.length === 0) throw new Error("Forge locks have not produced requirements.");
@@ -296,7 +419,7 @@ export class BmadControlPlane {
 
   acceptTicketTree(missionId: string, identity: string): Mission {
     const mission = this.must(missionId);
-    if (!identity.trim()) throw new Error("Accepting a ticket tree needs a person.");
+    if (!namedPerson(identity)) throw new Error("Accepting a ticket tree needs a person's name.");
     if (mission.tickets.length === 0) this.proposeTickets(missionId);
     const current = this.must(missionId);
     const rendered = renderTicketTree(current.epics, current.tickets);
@@ -319,6 +442,7 @@ export class BmadControlPlane {
       body: rendered.initiative,
       relativePath: path.join("_bmad-output", current.id, "tickets.toml"),
     });
+    this.syncWorkflow(current);
     this.emit(current, "StoryCreated", { tickets: current.tickets.map((ticket) => ticket.ref), by: identity });
     this.touch(current);
     saveMission(this.root, current);
@@ -338,15 +462,32 @@ export class BmadControlPlane {
       saveMission(this.root, mission);
       return mission;
     }
-    const result = skills.execute(skillId, mission.input, runnerConfig, mission.id);
+    const startedMs = Date.now();
+    const before = this.workingTreePaths();
+    // Recorded before the run so listeners (Jarvis, Mission Control) see the skill as working while it runs. A runner
+    // that is not installed never starts, so it records no start.
+    const startable = new CommandModelRunner(this.runner, runnerConfig, this.root).isAvailable();
+    if (startable) {
+      this.emit(mission, "SkillStarted", { skillId, commit: contract.commit, command: runnerConfig.command });
+      this.emit(mission, "ArtifactStarted", { skillId });
+    }
+    let result = skills.execute(skillId, this.skillInput(mission), runnerConfig, mission.id);
+    const strayed = this.containStrayWrites(mission, skillId, before, startedMs, result.stderr);
+    if (strayed && result.status !== "not-configured") {
+      result = { ...result, status: "output-invalid", reason: strayed, artifactPath: undefined };
+      const provenance = path.join(this.root, ".bmad-next", "missions", mission.id, "artifacts", `${skillId}.provenance.json`);
+      if (fs.existsSync(provenance)) {
+        const recorded = JSON.parse(fs.readFileSync(provenance, "utf8")) as Record<string, unknown>;
+        fs.writeFileSync(provenance, JSON.stringify({ ...recorded, status: "output-invalid", artifactPaths: [], reason: strayed }, null, 2));
+      }
+    }
     if (result.status === "not-configured") {
       this.setStep(mission, skillId, "not-configured", result.stderr || `Skill ${contract.id} did not start.`);
+      if (startable) this.emit(mission, "SkillFailed", { skillId, commit: contract.commit, status: "not-configured", exitCode: null });
       this.touch(mission);
       saveMission(this.root, mission);
       return mission;
     }
-    this.emit(mission, "SkillStarted", { skillId, commit: contract.commit, command: runnerConfig.command });
-    this.emit(mission, "ArtifactStarted", { skillId });
     const relative = path.join(".bmad-next", "missions", mission.id, "artifacts", `${skillId}.md`);
     const state = result.status === "completed" ? "complete" : result.status === "invalid-output" || result.status === "output-invalid" ? "invalid" : "failed";
     this.addArtifact(mission, {
@@ -369,6 +510,7 @@ export class BmadControlPlane {
         status: result.status,
       },
     });
+    if (result.status === "completed" && skillId === "bmad-architecture") this.applyArchitecture(mission);
     if (result.status === "completed") {
       this.setStep(mission, skillId, "completed", "Headless contract matched and named files exist.");
       const event = SKILL_EVENTS[skillId];
@@ -376,7 +518,7 @@ export class BmadControlPlane {
       this.emit(mission, "ArtifactCompleted", { skillId });
       this.emit(mission, "SkillCompleted", { skillId, commit: contract.commit, exitCode: result.exitCode, artifact: result.artifactPath ?? relative });
     } else {
-      this.setStep(mission, skillId, "blocked", result.stderr || result.status);
+      this.setStep(mission, skillId, "blocked", `${result.status}: ${result.reason ?? (result.stderr.replace(/\u001b\[[0-9;]*m/g, "").trim().slice(-300) || "no reason recorded")}`);
       this.emit(mission, "SkillFailed", { skillId, commit: contract.commit, status: result.status, exitCode: result.exitCode });
     }
     this.recordUsage(mission, {
@@ -403,7 +545,9 @@ export class BmadControlPlane {
     const ticket = mission.tickets.find((item) => item.ref === ticketRef);
     if (!ticket) throw new Error(`Ticket ${ticketRef} is not in the mission.`);
     const config = readConfig(this.root);
-    const routed = routeAgent(mission.agents, `${ticket.title} ${ticket.description}`, ticket.risk);
+    // Only agents that build may take a ticket; planning roles such as Architect never implement.
+    const builders = mission.agents.filter((candidate) => candidate.skills.includes("bmad-build"));
+    const routed = routeAgent(builders, `${ticket.title} ${ticket.description}`, ticket.risk);
     const agent = routed.agent?.name ?? "Developer";
     const runtime = resolveRuntimeId(config);
     const attempts = (mission.attempts[ticketRef] ?? 0) + 1;
@@ -465,7 +609,7 @@ export class BmadControlPlane {
         ticketRef,
         agent,
         cwd: worktreePath,
-        prompt: [ticket.title, ticket.description, ticket.verify].filter((part) => part.trim().length > 0).join("\n\n"),
+        prompt: [ticket.title, ticket.description, ticket.verify, this.buildContext(mission)].filter((part) => part.trim().length > 0).join("\n\n"),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -477,6 +621,7 @@ export class BmadControlPlane {
       this.emit(mission, "TicketBlocked", { ticketRef, reason: message });
       return this.finishDispatch(mission, ticketRef, agent, runtime, "failed", message);
     }
+    this.keepTranscript(mission, ticketRef, `build-${attempts}`, run.transcript);
     if (run.status === "timeout" || run.status === "cancelled") {
       this.noteExecution(mission, ticketRef, {
         skillId: "bmad-build",
@@ -505,8 +650,7 @@ export class BmadControlPlane {
       this.transition(mission, "blocked");
       return this.finishDispatch(mission, ticketRef, agent, runtime, "not-configured", run.message);
     }
-    this.transition(mission, mission.loop === "draft" ? "ready" : mission.loop);
-    if (mission.loop === "ready" || mission.loop === "blocked") this.transition(mission, "running");
+    this.reenterLoop(mission);
     this.emit(mission, "AgentStarted", { agent, runtime, ticketRef, runId: run.id, worktree: worktreePath });
     this.emit(mission, "StoryStarted", { ticketRef });
     this.emit(mission, "ToolStarted", { runtime, ticketRef });
@@ -684,6 +828,10 @@ export class BmadControlPlane {
     });
   }
 
+  inspectEvidence(missionId: string): ReturnType<typeof evaluateRelease> {
+    return evaluateRelease(this.must(missionId), fileExists);
+  }
+
   releaseGate(missionId: string): ReturnType<typeof evaluateRelease> {
     const mission = this.must(missionId);
     for (const requirement of mission.requirements) {
@@ -723,7 +871,7 @@ export class BmadControlPlane {
       const checkpoint = this.writeCheckpoint(mission, "Release Candidate", true);
       mission.lastVerifiedBuild = { checkpointId: checkpoint.id, at: checkpoint.at, commit, missionId: mission.id, releaseEvidence: releasePath };
       this.emit(mission, "ReleaseCreated", { state: report.state, checkpointId: checkpoint.id, releaseEvidence: releasePath });
-      if (mission.loop === "committed") this.transition(mission, "released");
+      this.walkLoop(mission, "released");
     }
     this.touch(mission);
     saveMission(this.root, mission);
@@ -740,7 +888,7 @@ export class BmadControlPlane {
   }
 
   approve(missionId: string, category: string, identity: string, reason: string): Approval {
-    if (!identity.trim()) throw new Error("Approval needs a person.");
+    if (!namedPerson(identity)) throw new Error("Approval needs a person's name.");
     const mission = this.must(missionId);
     const approval: Approval = { id: `apr_${this.id()}`, category, decision: "approved", identity, reason, at: this.now().toISOString() };
     mission.approvals.push(approval);
@@ -752,7 +900,7 @@ export class BmadControlPlane {
   }
 
   rejectRelease(missionId: string, identity: string, reason: string): Approval {
-    if (!identity.trim()) throw new Error("Approval needs a person.");
+    if (!namedPerson(identity)) throw new Error("Approval needs a person's name.");
     const mission = this.must(missionId);
     const approval: Approval = { id: `apr_${this.id()}`, category: "release", decision: "rejected", identity, reason, at: this.now().toISOString() };
     mission.approvals.push(approval);
@@ -1065,6 +1213,47 @@ export class BmadControlPlane {
     return { name: intent.name, skillId: intent.skillId, target: intent.target, detail: this.recommend(id) };
   }
 
+  /**
+   * Adds evidence kinds a mission must pass. The policy can only get stricter: kinds are added, never removed,
+   * and the change is recorded as an event.
+   */
+  requireEvidence(missionId: string, kinds: string[], identity: string): Mission {
+    const allowed = new Set(["unit", "review", "attack", "browser", "security", "nfr"]);
+    const unknown = kinds.filter((kind) => !allowed.has(kind));
+    if (unknown.length > 0) throw new Error(`Unknown evidence kind(s): ${unknown.join(", ")}.`);
+    if (!namedPerson(identity)) throw new Error("Tightening a release policy needs a person's name.");
+    const mission = this.must(missionId);
+    const added = kinds.filter((kind) => !(mission.requiredEvidence ?? []).includes(kind));
+    mission.requiredEvidence = [...(mission.requiredEvidence ?? []), ...added];
+    this.emit(mission, "PolicyTightened", { requiredEvidence: mission.requiredEvidence, added, by: identity });
+    this.touch(mission);
+    saveMission(this.root, mission);
+    return mission;
+  }
+
+  /** Runs every automated step until a person must decide or a gate stays blocked. */
+  autopilot(missionId: string, hooks: Partial<AutopilotHooks> = {}): Promise<AutopilotResult> {
+    if (!acquireAutopilotLock(this.root, missionId)) {
+      const reason = "Autopilot is already running for this mission.";
+      return Promise.resolve({ status: "blocked", missionId, reason, steps: [`Autopilot stopped: blocked. ${reason}`] });
+    }
+    const stopFile = path.join(this.root, ".bmad-next", "missions", missionId, "autopilot.stop");
+    return Promise.resolve()
+      .then(() => {
+        if (fs.existsSync(stopFile)) fs.rmSync(stopFile);
+        this.emit(this.must(missionId), "AutopilotStarted", {});
+        return runAutopilot(this, missionId, {
+          log: hooks.log ?? (() => undefined),
+          stopRequested: () => (hooks.stopRequested?.() ?? false) || fs.existsSync(stopFile),
+        });
+      })
+      .then((result) => {
+        this.emit(this.must(missionId), "AutopilotStopped", { status: result.status, reason: result.reason });
+        return result;
+      })
+      .finally(() => releaseAutopilotLock(this.root, missionId));
+  }
+
   startMission(missionId: string): Mission {
     return this.loops().start(missionId);
   }
@@ -1107,6 +1296,7 @@ export class BmadControlPlane {
       execution.evidence = mission.evidence.filter((record) => record.story_id === ticketRef).map((record) => record.evidence_id);
       execution.updatedAt = this.now().toISOString();
     }
+    this.syncWorkflow(mission);
     saveMission(this.root, mission);
     const latest = (mission.reviews ?? []).filter((item) => item.ticketRef === ticketRef).at(-1);
     if (!latest) throw new Error(`Ticket ${ticketRef} produced no review record.`);
@@ -1137,6 +1327,7 @@ export class BmadControlPlane {
     if (selected.availability() === "NOT CONFIGURED") {
       return this.finishDispatch(mission, ticketRef, "Developer", runtime, "not-configured", `${runtime} is not configured, so the repair did not start.`);
     }
+    this.reenterLoop(mission);
     this.moveIfLegal(mission, "repairing");
     let worktreePath: string;
     try {
@@ -1147,17 +1338,31 @@ export class BmadControlPlane {
       return this.finishDispatch(mission, ticketRef, "Developer", runtime, "blocked", message);
     }
     const changedFiles = this.listChanged(worktreePath);
-    const prompt = repairBrief({
-      ticketRef: ticket.ref,
-      title: ticket.title,
-      verify: ticket.verify,
-      worktree: worktreePath,
-      source: failure.source,
-      evidencePath: failure.evidencePath,
-      findings: failure.findings,
-      requirements: this.reviewRequirements(mission, ticket),
-      diff: this.captureDiff(worktreePath, changedFiles),
-    });
+    const latestUnit = [...mission.evidence].reverse().find((record) => record.story_id === ticket.ref && record.kind === "unit");
+    const failedUnit = latestUnit?.result === "fail" ? latestUnit : undefined;
+    const unitLog = failedUnit?.artifact && fs.existsSync(failedUnit.artifact) ? fs.readFileSync(failedUnit.artifact, "utf8") : "";
+    const failing = unitLog ? failingTestSummary(unitLog) : [];
+    const unitOutput = unitLog.slice(-1500);
+    const prompt = [
+      failing.length > 0
+        ? `Fix these failing tests first (${failedUnit?.command ?? "npm test"}). Fix the cause in the code or in the test setup; do not delete or weaken assertions:\n${failing.join("\n")}`
+        : "",
+      repairBrief({
+        ticketRef: ticket.ref,
+        title: ticket.title,
+        verify: ticket.verify,
+        worktree: worktreePath,
+        source: failure.source,
+        evidencePath: failure.evidencePath,
+        findings: failure.findings,
+        requirements: this.reviewRequirements(mission, ticket),
+        diff: this.captureDiff(worktreePath, changedFiles),
+      }),
+      unitOutput ? `Failing test output:\n${unitOutput}` : "",
+      this.buildContext(mission),
+    ]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n");
     this.emit(mission, "RepairStarted", { ticketRef, attempt: attempts, findings: failure.findings.map((finding) => finding.id), worktree: worktreePath, source: failure.source });
     let run: ReturnType<typeof selected.begin>;
     try {
@@ -1175,9 +1380,11 @@ export class BmadControlPlane {
       this.moveIfLegal(mission, "blocked");
       return this.finishDispatch(mission, ticketRef, "Developer", runtime, "failed", message);
     }
+    this.keepTranscript(mission, ticketRef, `repair-${attempts}`, run.transcript);
     const runtimeFinished = run.status === "completed" && (run.exitCode === 0 || run.completionSignal === "terminal-event");
     const repairStatus = run.status === "timeout" ? "TIMED_OUT" : run.status === "cancelled" ? "CANCELLED" : runtimeFinished ? "COMPLETED" : "FAILED";
     this.rememberRepair(mission, this.repairRecord(ticketRef, attempts, repairStatus, failure, worktreePath, run.message, run.phases ?? [repairStatus], config.retryBudget));
+    this.emit(mission, "RepairCompleted", { ticketRef, attempt: attempts, status: repairStatus, source: failure.source });
     if (!runtimeFinished) {
       this.noteExecution(mission, ticketRef, {
         skillId: "bmad-build",
@@ -1216,7 +1423,13 @@ export class BmadControlPlane {
       mission.securityRuns = saved.securityRuns ?? [];
       securityPassed = again.status === "PASS";
     }
-    const closed = reviewPassed && !attackFailed && (failure.source !== "attack" || attackPassed) && (failure.source !== "security" || (attackPassed && securityPassed));
+    const testsPassed = [...mission.evidence].reverse().find((record) => record.story_id === ticketRef && record.kind === "unit")?.result === "pass";
+    const closed =
+      reviewPassed &&
+      !attackFailed &&
+      (failure.source !== "attack" || attackPassed) &&
+      (failure.source !== "security" || (attackPassed && securityPassed)) &&
+      (failure.source !== "tests" || testsPassed);
     this.noteExecution(mission, ticketRef, {
       skillId: "bmad-build",
       agent: "Developer",
@@ -1433,7 +1646,16 @@ export class BmadControlPlane {
       return { status: "NOT_RUN", measurements: [], runtime: provider.id, environment: body.environment, timestamp };
     }
     this.emit(mission, "NfrStarted", { ticketRef: ref });
-    const measurements = parsed.map((requirement) => provider.measureBlocking({ missionId: mission.id, ticketRef: ref, worktree, requirement }));
+    const needsPreview = parsed.some((requirement) => requirement.verificationMethod.includes(PREVIEW_MARKER));
+    const served = needsPreview ? this.previewFor(mission, ref) : null;
+    const measurements = parsed.map((requirement) => {
+      if (!requirement.verificationMethod.includes(PREVIEW_MARKER)) return provider.measureBlocking({ missionId: mission.id, ticketRef: ref, worktree, requirement });
+      if (!served || typeof served === "string") {
+        return { id: requirement.id, metric: requirement.metric, target: requirement.target, operator: requirement.operator, unit: requirement.unit, measured: null, result: "ERROR" as const, command: requirement.verificationMethod, stdout: "", stderr: served ?? "No preview.", durationMs: 0 };
+      }
+      return provider.measureBlocking({ missionId: mission.id, ticketRef: ref, worktree, requirement: { ...requirement, verificationMethod: withPreview(requirement.verificationMethod, served.url) } });
+    });
+    if (served && typeof served !== "string") served.stop();
     const status = measurements.some((item) => item.result === "NOT_CONFIGURED")
       ? "NOT_CONFIGURED"
       : measurements.some((item) => item.result === "ERROR")
@@ -1544,6 +1766,134 @@ export class BmadControlPlane {
     return { status: report.status, evidence: historical };
   }
 
+  /**
+   * Asks the model runner for the browser acceptance scenario and measurable NFRs of a built ticket
+   * (upstream role: bmad-qa-generate-e2e-tests). The plan is validated and registered; it never passes
+   * anything. Playwright and the latency probe produce the results.
+   */
+  planVerification(missionId: string, ticketRef?: string): { status: "PLANNED" | "BLOCKED" | "NOT_CONFIGURED"; summary: string; scenario?: BrowserScenario; nfr?: NfrRequirement[]; evidence?: string } {
+    const mission = this.must(missionId);
+    const ref = ticketRef && mission.tickets.some((ticket) => ticket.ref === ticketRef) ? ticketRef : mission.tickets.at(-1)?.ref;
+    const ticket = mission.tickets.find((item) => item.ref === ref);
+    if (!ticket) return { status: "BLOCKED", summary: "No ticket to plan verification for." };
+    const requirement = mission.requirements.find((item) => ticket.covers.includes(item.id));
+    if (!requirement) return { status: "BLOCKED", summary: `Ticket ${ticket.ref} covers no requirement.` };
+    const execution = (mission.executions ?? []).find((item) => item.ticketRef === ticket.ref);
+    const worktree = execution?.worktree;
+    const implemented = Boolean(execution?.artifact && fs.existsSync(execution.artifact)) && mission.plans.some((item) => item.ref === ticket.ref && item.status !== "planned");
+    if (!implemented || !worktree || !fs.existsSync(worktree)) return { status: "BLOCKED", summary: `Ticket ${ticket.ref} has no built implementation, so there is no app to plan against.` };
+    const dir = previewDir(worktree, mission.architecture.filter((item) => item.kind === "layer").map((item) => item.choice), this.listChanged(worktree));
+    if (!dir) return { status: "BLOCKED", summary: `Ticket ${ticket.ref} has no index.html to serve.` };
+    const runnerConfig = resolveRunnerConfig(readConfig(this.root));
+    if (!runnerConfig) return { status: "NOT_CONFIGURED", summary: "No model runner is configured, so no verification plan was drafted." };
+    const nonGoals = (mission.forge?.locks ?? []).find((lock) => lock.key === "non-goals")?.text ?? "";
+    const nfrText = mission.artifacts
+      .filter((artifact) => artifact.state === "complete" && artifact.kind !== "implementation" && artifact.kind !== "verification-plan")
+      .map((artifact) => {
+        const file = artifact.path ? path.resolve(this.root, artifact.path) : "";
+        return file && fs.existsSync(file) && fs.statSync(file).isFile() ? fs.readFileSync(file, "utf8") : artifact.body;
+      })
+      .join("\n")
+      .split("\n")
+      .filter((line) => /\b(nfr|non-functional|performance|latency|load time|response time|milliseconds|\d+\s*ms)\b/i.test(line))
+      .slice(0, 40)
+      .join("\n");
+    const prompt = planPrompt({ requirementId: requirement.id, title: requirement.title, acceptance: requirement.acceptance_criteria, nonGoals, nfrText, source: appSource(dir) });
+    const scratch = path.join(this.root, ".bmad-next", "missions", mission.id, "plan-cwd");
+    fs.mkdirSync(scratch, { recursive: true });
+    const before = this.fingerprint(worktree);
+    this.emit(mission, "SkillStarted", { skillId: "bmad-qa-generate-e2e-tests", ticketRef: ticket.ref, command: runnerConfig.command });
+    const result = new CommandModelRunner(this.runner, runnerConfig, this.root).runSync({
+      skillId: "bmad-qa-generate-e2e-tests",
+      prompt,
+      input: "",
+      cwd: scratch,
+      timeoutMs: runnerConfig.timeoutMs ?? 120000,
+    });
+    const evidenceDir = path.join(this.root, ".bmad-next", "evidence", mission.id);
+    fs.mkdirSync(evidenceDir, { recursive: true });
+    const evidence = path.join(evidenceDir, `${ticket.ref}-verification-plan-${this.id()}.json`);
+    const mutated = this.fingerprint(worktree) !== before;
+    const parsed = result.status === "completed" && !mutated ? parsePlan(result.stdout, requirement.id) : null;
+    const reason =
+      result.status === "timeout"
+        ? "Planner timed out."
+        : result.status !== "completed"
+          ? `Planner ${result.status}: ${result.stderr.trim().slice(-400)}`
+          : mutated
+            ? "Planner changed the ticket worktree, so its plan was discarded."
+            : typeof parsed === "string"
+              ? parsed
+              : "";
+    fs.writeFileSync(
+      evidence,
+      JSON.stringify(
+        {
+          promptVersion: PLAN_PROMPT_VERSION,
+          mission: mission.id,
+          ticket: ticket.ref,
+          requirement: requirement.id,
+          served: dir,
+          runner: runnerConfig.command,
+          model: runnerConfig.model ?? null,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs ?? null,
+          status: reason ? "BLOCKED" : "PLANNED",
+          reason: reason || null,
+          raw: redactSecrets(result.stdout).slice(0, 20000),
+          plan: parsed && typeof parsed !== "string" ? parsed : null,
+        },
+        null,
+        2,
+      ),
+    );
+    if (reason || !parsed || typeof parsed === "string") {
+      this.emit(mission, "SkillFailed", { skillId: "bmad-qa-generate-e2e-tests", ticketRef: ticket.ref, status: "blocked", reason: reason || "no plan" });
+      saveMission(this.root, mission);
+      return { status: "BLOCKED", summary: reason || "Planner produced no plan.", evidence };
+    }
+    this.registerBrowserScenario(mission.id, parsed.scenario);
+    const saved = this.must(mission.id);
+    const planned: NfrRequirement[] = parsed.nfr.map(({ source: _source, ...item }) => item);
+    saved.nfrRequirements = [...(saved.nfrRequirements ?? []).filter((item) => !planned.some((next) => next.id === item.id)), ...planned];
+    this.addArtifact(saved, {
+      kind: "verification-plan",
+      skillId: "bmad-qa-generate-e2e-tests",
+      creator: "model-runner",
+      producer: runnerConfig.command,
+      body: JSON.stringify(parsed, null, 2),
+      relativePath: path.relative(this.root, evidence),
+    });
+    this.emit(saved, "SkillCompleted", {
+      skillId: "bmad-qa-generate-e2e-tests",
+      ticketRef: ticket.ref,
+      scenario: parsed.scenario.id,
+      nfr: parsed.nfr.map((item) => `${item.metric} ${item.operator} ${item.target}${item.unit} (${item.source})`),
+    });
+    this.touch(saved);
+    saveMission(this.root, saved);
+    return {
+      status: "PLANNED",
+      summary: `Scenario ${parsed.scenario.id}: ${parsed.scenario.steps.length} steps, ${parsed.scenario.assertions.length} assertions. ${planned.length} NFR(s).`,
+      scenario: parsed.scenario,
+      nfr: planned,
+      evidence,
+    };
+  }
+
+  /** Serves a ticket's web app from its worktree for the browser and NFR gates. */
+  private previewFor(mission: Mission, ticketRef: string | undefined): PreviewServer | string {
+    const worktree = (mission.executions ?? []).find((item) => item.ticketRef === ticketRef)?.worktree;
+    if (!worktree || !fs.existsSync(worktree)) return `Ticket ${ticketRef ?? "(none)"} has no worktree on disk to serve.`;
+    const dir = previewDir(worktree, mission.architecture.filter((item) => item.kind === "layer").map((item) => item.choice), this.listChanged(worktree));
+    if (!dir) return `Ticket ${ticketRef ?? "(none)"} has no index.html to serve.`;
+    try {
+      return startPreview(dir);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   registerBrowserScenario(missionId: string, scenario: BrowserScenario): BrowserScenario {
     const mission = this.must(missionId);
     if (!mission.requirements.some((requirement) => requirement.id === scenario.requirementId)) {
@@ -1569,7 +1919,10 @@ export class BmadControlPlane {
     const worktree = (mission.executions ?? []).find((item) => item.ticketRef === ref)?.worktree;
     if (!worktree || !fs.existsSync(worktree)) return { status: "BLOCKED", summary: "The ticket worktree is not on disk, so no attack ran." };
     this.conductAttack(mission, ticket, worktree);
-    return [...(this.must(missionId).attacks ?? [])].reverse().find((item) => item.ticketRef === ref) ?? { status: "BLOCKED", summary: "Attack produced no record." };
+    const attacked = this.must(missionId);
+    this.syncWorkflow(attacked);
+    saveMission(this.root, attacked);
+    return [...(attacked.attacks ?? [])].reverse().find((item) => item.ticketRef === ref) ?? { status: "BLOCKED", summary: "Attack produced no record." };
   }
 
   verifyTicket(missionId: string, ticketRef: string): { ticketRef: string; verification: string; evidence: EvidenceRecord[] } {
@@ -1609,24 +1962,44 @@ export class BmadControlPlane {
     const config = readConfig(this.root);
     const origins = config.browserOrigins ?? [];
     if (origins.length === 0) return this.browserRefusal(mission, scenario.id, "NOT_CONFIGURED", "No browser origins are configured.", startedAt, scenario);
-    const invalid = validateScenario(scenario, origins, mission.autonomy);
+    const planned = JSON.stringify(scenario).includes(PREVIEW_MARKER);
+    const invalid = planned ? null : validateScenario(scenario, origins, mission.autonomy);
     if (invalid) return this.browserRefusal(mission, scenario.id, "ERROR", invalid, startedAt, scenario);
     const provider = this.browserFor();
     if (!provider.availableSync()) {
       const probed = provider.id === "playwright" ? probePlaywright().detail : "Browser provider is not available.";
       return this.browserRefusal(mission, scenario.id, "NOT_CONFIGURED", probed, startedAt, scenario);
     }
-    this.emit(mission, "BrowserStarted", { scenarioId: scenario.id, requirementId: scenario.requirementId, browser: provider.id });
+    let preview: PreviewServer | null = null;
+    let target = scenario;
+    if (planned) {
+      const ticketRef = mission.tickets.find((ticket) => ticket.covers.includes(scenario.requirementId))?.ref;
+      const started = this.previewFor(mission, ticketRef);
+      if (typeof started === "string") return this.browserRefusal(mission, scenario.id, "ERROR", `Application unavailable: ${started}`, startedAt, scenario);
+      preview = started;
+      target = JSON.parse(withPreview(JSON.stringify(scenario), started.url)) as BrowserScenario;
+      const invalidServed = validateScenario(target, origins, mission.autonomy);
+      if (invalidServed) {
+        started.stop();
+        return this.browserRefusal(mission, scenario.id, "ERROR", invalidServed, startedAt, scenario);
+      }
+    }
+    this.emit(mission, "BrowserStarted", { scenarioId: scenario.id, requirementId: scenario.requirementId, browser: provider.id, url: preview?.url ?? scenario.startUrl });
     const evidenceDir = path.join(this.root, ".bmad-next", "evidence", mission.id, scenario.id);
     fs.mkdirSync(evidenceDir, { recursive: true });
-    const result = seal(await provider.run(scenario, { origins, autonomy: mission.autonomy, timeoutMs: 30000, evidenceDir }));
+    let result: BrowserResult;
+    try {
+      result = seal(await provider.run(target, { origins, autonomy: mission.autonomy, timeoutMs: 60000, evidenceDir }));
+    } finally {
+      preview?.stop();
+    }
     for (const step of result.steps) {
       this.emit(mission, "BrowserStepStarted", { scenarioId: scenario.id, action: step.action, name: step.name });
       this.emit(mission, "BrowserStepCompleted", { scenarioId: scenario.id, action: step.action, name: step.name, status: step.status });
     }
     const artifact = path.join(this.root, ".bmad-next", "evidence", mission.id, `${scenario.id}.json`);
     fs.mkdirSync(path.dirname(artifact), { recursive: true });
-    fs.writeFileSync(artifact, JSON.stringify({ ...result, scenario, timestamp: result.endedAt }, null, 2));
+    fs.writeFileSync(artifact, JSON.stringify({ ...result, scenario: target, preview: preview ? { url: preview.url, dir: preview.dir } : null, timestamp: result.endedAt }, null, 2));
     const evidenceResult: EvidenceResult = result.status === "PASS" ? "pass" : result.status === "NOT_CONFIGURED" ? "not-configured" : result.status === "ERROR" ? "blocked" : "fail";
     this.recordEvidence(mission.id, {
       requirement_id: scenario.requirementId,
@@ -1847,7 +2220,7 @@ export class BmadControlPlane {
   }
 
   exportMission(missionId: string): string {
-    return JSON.stringify({ mission: this.must(missionId), events: readEvents(this.root, missionId) }, null, 2);
+    return redactSecrets(JSON.stringify({ schemaVersion: 1, mission: this.must(missionId), events: readEvents(this.root, missionId) }, null, 2));
   }
 
   importMission(payload: string): Mission {
@@ -1857,6 +2230,16 @@ export class BmadControlPlane {
     }
     saveMission(this.root, parsed.mission);
     return parsed.mission;
+  }
+
+  /** The mission's recorded domain events, oldest first. Read-only. */
+  events(missionId: string): DomainEvent[] {
+    return readEvents(this.root, this.must(missionId).id);
+  }
+
+  /** Where the mission's event log lives, so listeners can watch it instead of polling. */
+  eventLogPath(missionId: string): string {
+    return path.join(this.root, ".bmad-next", "missions", missionId, "events.jsonl");
   }
 
   timeline(missionId: string): Array<{ at: string; type: string }> {
@@ -1903,8 +2286,48 @@ export class BmadControlPlane {
     return runMutation(this.runner, resolved, command, args, this.root);
   }
 
-  chaos(scenario: "timeout" | "dependency-failure", command: string, args: string[]): ReturnType<typeof runChaos> {
+  chaos(scenario: "timeout" | "dependency-failure" | "database-failure" | "network-failure" | "duplicate" | "partial", command: string, args: string[]): ReturnType<typeof runChaos> {
     return runChaos(this.runner, scenario, command, args, this.root);
+  }
+
+  updatePlugin(manifest: PluginManifest): PluginRecord {
+    return replacePlugin(this.root, manifest, this.now().toISOString());
+  }
+
+  rollbackPlugin(id: string): PluginRecord {
+    const record = restorePlugin(this.root, id);
+    const active = activeMissionId(this.root);
+    if (active) this.emit(this.must(active), "PluginRolledBack", { id, version: record.version });
+    return record;
+  }
+
+  upstream(id: "loop" | "tea" | "builder" | "promptfoo", args: string[] = []): ReturnType<typeof upstreamModule> {
+    return upstreamModule(this.runner, id, args, this.root);
+  }
+
+  acp(): ReturnType<typeof acpInitialize> {
+    return acpInitialize(process.env.BMAD_ACP_COMMAND, [], this.root);
+  }
+
+  agentCard(fetchImpl?: typeof fetch): ReturnType<typeof readAgentCard> {
+    return readAgentCard(process.env.BMAD_A2A_URL, fetchImpl);
+  }
+
+  symbols(): ReturnType<typeof textualSymbols> {
+    return textualSymbols(this.root);
+  }
+
+  codeQuery(binary: "ast-grep" | "zoekt" | "tree-sitter" | "aider", args: string[]): ReturnType<typeof toolProbe> {
+    return toolProbe(this.runner, binary, args, this.root);
+  }
+
+  diagnoseLog(log: string): ReturnType<typeof diagnoseCiLog> {
+    return diagnoseCiLog(log);
+  }
+
+  visual(url: string): ReturnType<typeof captureViewports> {
+    const dir = path.join(this.root, ".bmad-next", "evidence", "visual", this.id());
+    return captureViewports(url, dir);
   }
 
   config(): ControlConfig {
@@ -2115,6 +2538,7 @@ export class BmadControlPlane {
   private finishDispatch(mission: Mission, ticketRef: string, agent: string, runtime: string, status: DispatchRecord["status"], message: string, worktree?: string): DispatchRecord {
     const record: DispatchRecord = { id: `dsp_${this.id()}`, ticketRef, agent, runtime, status, at: this.now().toISOString(), message, worktree };
     mission.dispatches.push(record);
+    this.syncWorkflow(mission);
     this.touch(mission);
     saveMission(this.root, mission);
     return record;
@@ -2146,6 +2570,7 @@ export class BmadControlPlane {
       attempt: input.attempts,
       changedFiles: previous?.changedFiles ?? [],
       evidence: previous?.evidence ?? [],
+      runtimeLog: previous?.runtimeLog,
       ...input,
       ticketRef,
       updatedAt: now,
@@ -2153,6 +2578,16 @@ export class BmadControlPlane {
     const index = mission.executions.findIndex((item) => item.ticketRef === ticketRef);
     if (index >= 0) mission.executions[index] = next;
     else mission.executions.push(next);
+  }
+
+  /** Saves what the coding runtime printed so a failed or suspicious run can be audited later. */
+  private keepTranscript(mission: Mission, ticketRef: string, label: string, transcript: string | undefined): void {
+    if (!transcript) return;
+    const file = path.join(this.root, ".bmad-next", "evidence", mission.id, `${ticketRef}-runtime-${label}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, redactSecrets(transcript));
+    const execution = (mission.executions ?? []).find((item) => item.ticketRef === ticketRef);
+    if (execution) execution.runtimeLog = file;
   }
 
   private listChanged(cwd: string): string[] {
@@ -2177,21 +2612,24 @@ export class BmadControlPlane {
 
   private verifyBuiltTicket(mission: Mission, ticket: TicketEntry, cwd: string): TicketExecution["verification"] {
     this.emit(mission, "VerificationStarted", { ticketRef: ticket.ref });
-    const packagePath = path.join(cwd, "package.json");
+    const testDir = testPackageDir(cwd, this.listChanged(cwd));
+    const packagePath = path.join(testDir, "package.json");
+    const where = path.relative(cwd, testDir);
+    const testCommand = where ? `npm test (in ${where})` : "npm test";
     let verification: TicketExecution["verification"] = "not-run";
     if (fs.existsSync(packagePath)) {
       const parsed = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { scripts?: { test?: string } };
       const script = parsed.scripts?.test;
       if (typeof script === "string" && script.trim()) {
-        this.emit(mission, "TestStarted", { ticketRef: ticket.ref, command: "npm test" });
+        this.emit(mission, "TestStarted", { ticketRef: ticket.ref, command: testCommand });
         const started = this.now().toISOString();
-        const result = this.runner.run("npm", ["test"], cwd, 120000);
+        const result = this.runner.run("npm", ["test"], testDir, 120000);
         const finished = this.now().toISOString();
         const relative = path.join(".bmad-next", "evidence", mission.id, `${ticket.ref}-unit.log`);
         const absolute = path.join(this.root, relative);
         fs.mkdirSync(path.dirname(absolute), { recursive: true });
         fs.writeFileSync(absolute, `${result.stdout}\n${result.stderr}`);
-        const passed = result.exitCode === 0 && !result.timedOut;
+        const passed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout);
         this.recordEvidence(mission.id, {
           requirement_id: ticket.covers[0],
           story_id: ticket.ref,
@@ -2203,7 +2641,7 @@ export class BmadControlPlane {
           started_at: started,
           finished_at: finished,
           exit_code: result.exitCode,
-          command: "npm test",
+          command: testCommand,
           artifact: absolute,
         });
         verification = passed ? "pass" : "fail";
@@ -2245,7 +2683,7 @@ export class BmadControlPlane {
   private attackBlocksBrowser(mission: Mission, requirementId: string): string | null {
     const tickets = mission.tickets.filter((ticket) => ticket.covers.includes(requirementId));
     const requirement = mission.requirements.find((item) => item.id === requirementId);
-    const attackRequired = requirement ? requiredEvidenceKinds(requirement.risk, mission.attackRiskFloor ?? "high").includes("attack") : missionEvidenceKinds(mission).includes("attack");
+    const attackRequired = requirement ? requirementKinds(requirement, mission).includes("attack") : missionEvidenceKinds(mission).includes("attack");
     const relevant = tickets.length > 0 ? tickets : mission.tickets;
     for (const ticket of relevant) {
       const attack = [...(mission.attacks ?? [])].reverse().find((item) => item.ticketRef === ticket.ref);
@@ -2321,12 +2759,30 @@ export class BmadControlPlane {
     return new CommandNfrProvider(this.runner);
   }
 
-  private repairSource(mission: Mission, ticketRef: string): { source: "review" | "attack" | "security"; findings: ReviewResult["findings"]; evidencePath: string } | null {
+  private repairSource(mission: Mission, ticketRef: string): { source: "review" | "attack" | "security" | "tests"; findings: ReviewResult["findings"]; evidencePath: string } | null {
     const review = (mission.reviews ?? []).filter((item) => item.ticketRef === ticketRef).at(-1);
     const attack = (mission.attacks ?? []).filter((item) => item.ticketRef === ticketRef).at(-1);
     const security = (mission.securityRuns ?? []).filter((item) => item.ticketRef === ticketRef).at(-1);
-    const candidates: Array<{ source: "review" | "attack" | "security"; at: string; findings: ReviewResult["findings"]; evidencePath: string }> = [];
+    const candidates: Array<{ source: "review" | "attack" | "security" | "tests"; at: string; findings: ReviewResult["findings"]; evidencePath: string }> = [];
     if (review?.status === "FAIL") candidates.push({ source: "review", at: review.endedAt, findings: review.findings, evidencePath: review.evidencePath });
+    // A review the reviewer could not confirm is not a pass. What it could not confirm becomes the repair task.
+    if (review?.status === "BLOCKED" && (review.unclear ?? []).length > 0) {
+      candidates.push({
+        source: "review",
+        at: review.endedAt,
+        evidencePath: review.evidencePath,
+        findings: [
+          ...review.findings,
+          {
+            id: "REV-UNCLEAR",
+            severity: "high",
+            category: "tests",
+            message: `The reviewer could not confirm ${(review.unclear ?? []).join(", ")}. ${review.summary.replace(/\nstatus: blocked$/, "")}`,
+            repair: "Add or strengthen tests so each of those items is demonstrated, and fix any behavior the new tests expose. Do not weaken existing tests.",
+          },
+        ],
+      });
+    }
     if (attack?.status === "FAIL") candidates.push({ source: "attack", at: attack.endedAt, findings: attack.findings, evidencePath: attack.evidencePath });
     if (security?.status === "FAIL") {
       candidates.push({
@@ -2345,6 +2801,32 @@ export class BmadControlPlane {
         evidencePath: security.evidencePath,
       });
     }
+    const unit = [...mission.evidence].reverse().find((record) => record.story_id === ticketRef && record.kind === "unit");
+    if (unit?.result === "fail" && candidates.length === 0) {
+      const log = unit.artifact && fs.existsSync(unit.artifact) ? fs.readFileSync(unit.artifact, "utf8") : "";
+      const failed = log
+        .replace(/\u001b\[[0-9;]*m/g, "")
+        .split("\n")
+        .filter((line) => /✖|not ok|AssertionError|Error:|expected|actual/.test(line))
+        .slice(0, 12)
+        .join("\n");
+      candidates.push({
+        source: "tests",
+        at: unit.finished_at,
+        findings: [
+          {
+            id: "TEST-FAIL",
+            severity: "high",
+            category: "tests",
+            message: `${unit.command} failed (exit ${String(unit.exit_code)}).${failed ? `\n${failed}` : ""}`,
+            file: undefined,
+            evidence: unit.artifact,
+            repair: "Fix the implementation so the failing tests pass. Do not weaken, skip, or delete the tests.",
+          },
+        ],
+        evidencePath: unit.artifact ?? "",
+      });
+    }
     candidates.sort((left, right) => left.at.localeCompare(right.at));
     const latest = candidates.at(-1);
     return latest ? { source: latest.source, findings: latest.findings, evidencePath: latest.evidencePath } : null;
@@ -2354,7 +2836,7 @@ export class BmadControlPlane {
     ticketRef: string,
     attempt: number,
     status: RepairRecord["status"],
-    failure: { source: "review" | "attack" | "security"; findings: ReviewResult["findings"] },
+    failure: { source: "review" | "attack" | "security" | "tests"; findings: ReviewResult["findings"] },
     worktree: string,
     message: string,
     phases: RepairRecord["phases"],
@@ -2389,7 +2871,13 @@ export class BmadControlPlane {
     const base = this.runner.run("git", ["rev-parse", "HEAD"], cwd, 10000);
     const head = base.stdout.trim() || "unknown";
     const changedFiles = this.listChanged(cwd);
-    const unit = [...mission.evidence].reverse().find((record) => record.story_id === ticket.ref && record.kind === "unit");
+    const unit = [...this.must(mission.id).evidence].reverse().find((record) => record.story_id === ticket.ref && record.kind === "unit");
+    const unitLog = unit?.artifact && fs.existsSync(unit.artifact) ? fs.readFileSync(unit.artifact, "utf8") : "";
+    const edge = detectEdgeCaseTests(
+      cwd,
+      this.reviewRequirements(mission, ticket).flatMap((item) => item.acceptanceCriteria),
+      { result: unit?.result, log: unitLog },
+    );
     const context: ReviewContext = {
       missionId: mission.id,
       missionTitle: mission.title,
@@ -2402,7 +2890,7 @@ export class BmadControlPlane {
       headCommit: head,
       changedFiles,
       diff: this.captureDiff(cwd, changedFiles),
-      testEvidence: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command } : null,
+      testEvidence: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command, edgeCases: edge.status } : null,
       followsRepair: (mission.repairs ?? []).some((item) => item.ticketRef === ticket.ref && item.status === "COMPLETED"),
       repairAttempt: [...(mission.repairs ?? [])].reverse().find((item) => item.ticketRef === ticket.ref && item.status === "COMPLETED")?.attempt,
     };
@@ -2418,6 +2906,24 @@ export class BmadControlPlane {
     const absolute = path.join(this.root, relative);
     const attempt = (mission.reviews ?? []).filter((item) => item.ticketRef === ticket.ref).length + 1;
     let sealed = downgradeReview(judged, { worktreeMutated: mutated });
+    if (!testCommandRanTests(unitLog)) {
+      sealed = {
+        ...sealed,
+        status: "FAIL",
+        summary: "The test command reported zero tests. Exit code 0 without an executed test is not a review pass.",
+        findings: [
+          ...sealed.findings,
+          {
+            id: "REV-TESTS",
+            severity: "high",
+            category: "tests",
+            message: "No test was executed.",
+            file: "package.json",
+            repair: "Use the editor write tool to add a test file the package test script executes. Do not use bash or apply_patch. Assert the changed behavior with node:test and node:assert. If a source file calls require inside an ES module, replace that check with import.meta.url. Keep the comment // BMAD-TICKET-STATUS: built.",
+          },
+        ],
+      };
+    }
     const endedAt = this.now().toISOString();
     const record = this.toReviewRecord(sealed, ticket.ref, attempt, cwd, head, changedFiles, absolute, startedAt, endedAt, reviewer.id, diffFingerprint, duplicateDiff);
     record.priorDiffFingerprint = prior?.diffFingerprint ?? null;
@@ -2528,6 +3034,8 @@ export class BmadControlPlane {
       criteria: result.criteria,
       architectureDrift: result.architectureDrift,
       summary: result.summary,
+      rawOutput: result.rawOutput,
+      unclear: result.unclear,
       durationMs: result.durationMs,
       modelCost: result.quality.modelCost,
       falsePositiveFeedback: result.quality.falsePositiveFeedback,
@@ -2573,6 +3081,7 @@ export class BmadControlPlane {
         duplicateDiff: record.duplicateDiff,
         durationMs: record.durationMs,
         exitCode: record.exitCode,
+        rawOutput: record.rawOutput ?? null,
         quality: {
           findings: record.findings.length,
           falsePositiveFeedback: record.falsePositiveFeedback,
@@ -2641,6 +3150,33 @@ export class BmadControlPlane {
       result: record.status,
       timestamp: record.endedAt,
     };
+  }
+
+  /** A new build or repair attempt re-enters the loop legally from draft, failed, ready, or blocked. */
+  private reenterLoop(mission: Mission): void {
+    if (mission.loop === "draft" || mission.loop === "failed") this.transition(mission, "ready");
+    if (mission.loop === "ready" || mission.loop === "blocked") this.transition(mission, "running");
+  }
+
+  /** Follows the shortest legal path to a loop state without passing through blocked, failed, or cancelled. */
+  private walkLoop(mission: Mission, target: LoopState): void {
+    const avoid = new Set<LoopState>(["blocked", "failed", "cancelled"]);
+    const start: LoopState = mission.loop === "failed" ? "ready" : mission.loop;
+    const previous = new Map<LoopState, LoopState | null>([[start, null]]);
+    const queue: LoopState[] = [start];
+    while (queue.length > 0 && !previous.has(target)) {
+      const current = queue.shift() as LoopState;
+      for (const next of LOOP_TRANSITIONS[current]) {
+        if (previous.has(next) || (avoid.has(next) && next !== target)) continue;
+        previous.set(next, current);
+        queue.push(next);
+      }
+    }
+    if (!previous.has(target)) return;
+    const path: LoopState[] = [];
+    for (let state: LoopState | null | undefined = target; state && state !== start; state = previous.get(state)) path.unshift(state);
+    if (mission.loop === "failed") this.transition(mission, "ready");
+    for (const state of path) this.transition(mission, state);
   }
 
   private moveIfLegal(mission: Mission, next: LoopState): void {
@@ -2721,6 +3257,154 @@ export class BmadControlPlane {
     });
   }
 
+  /**
+   * What the coding runtime needs beyond the ticket: settled decisions, declared architecture, and
+   * absolute paths to BMad artifacts. Those are gitignored, so they are not inside the worktree.
+   */
+  private buildContext(mission: Mission): string {
+    const locks = (mission.forge?.locks ?? []).filter((lock) => lock.key !== "outcome").map((lock) => `- ${lock.key}: ${lock.text}`);
+    const artifacts = mission.artifacts
+      .filter((artifact) => artifact.state === "complete" && artifact.kind !== "implementation" && artifact.path)
+      .map((artifact) => `- ${artifact.skillId || artifact.kind}: ${path.isAbsolute(artifact.path) ? artifact.path : path.join(this.root, artifact.path)}`);
+    const layers = mission.architecture.filter((item) => item.kind === "layer").map((item) => item.choice);
+    return [
+      locks.length > 0 ? `Forge decisions:\n${locks.join("\n")}` : "",
+      mission.architecture.length > 0
+        ? `Declared architecture. Architecture verification checks the tree against it:\n${mission.architecture.map((item) => `- ${item.kind}: ${item.choice}`).join("\n")}`
+        : "",
+      layers.length > 0
+        ? `Put the implementation, its package.json, and its tests inside ${layers.join(", ")}. The package.json test script must run real tests of the acceptance criterion. They run with npm test in that directory under Node, without a browser, so keep the logic they exercise in a module Node can require. Each test must start from a clean state (fresh storage and data) and must not depend on another test's leftovers or order. Code the page loads must still run in a browser: no Node APIs such as fs, and no bare require; a module shared by the page and the tests exports with module.exports when module exists and otherwise attaches to window. A declared node technology is satisfied by JavaScript files; it does not make the page a Node program.`
+        : "Add a package.json whose test script runs real tests of the acceptance criterion.",
+      artifacts.length > 0 ? `BMad artifacts for this mission (read them):\n${artifacts.join("\n")}` : "",
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n\n");
+  }
+
+  /** Paths git reports as changed or untracked in the main working tree, with their modification times. */
+  private workingTreePaths(): Map<string, number> {
+    const listed = this.runner.run("git", ["status", "--porcelain", "--untracked-files=all"], this.root, 20000);
+    const paths = new Map<string, number>();
+    if (listed.exitCode !== 0) return paths;
+    for (const line of listed.stdout.split("\n")) {
+      if (line.length <= 3) continue;
+      const file = line.slice(3).split(" -> ").at(-1)?.replace(/^"|"$/g, "") ?? "";
+      const absolute = path.join(this.root, file);
+      paths.set(file, fs.existsSync(absolute) ? fs.statSync(absolute).mtimeMs : -1);
+    }
+    return paths;
+  }
+
+  /**
+   * Planning skills may write only under _bmad-output and .bmad-next. Files a run created elsewhere are moved to the
+   * mission's quarantine; files that already existed are reported and left for a person to inspect.
+   */
+  private containStrayWrites(mission: Mission, skillId: string, before: Map<string, number>, startedMs: number, transcript = ""): string | null {
+    const allowed = (file: string) => file.startsWith("_bmad-output/") || file.startsWith(".bmad-next/");
+    const changed = [...this.workingTreePaths()]
+      .filter(([file, mtime]) => !allowed(file) && mtime >= 0 && (before.has(file) ? before.get(file) !== mtime : mtime >= startedMs))
+      .map(([file]) => file);
+    if (changed.length === 0) return null;
+    // When the runner prints its tool log (OpenCode does), only files it wrote are the skill's; other changes in the
+    // window came from someone else, such as a person editing the repository, and are reported without blocking.
+    const written = runnerWrites(transcript, this.root);
+    const touched = written === null ? changed : changed.filter((file) => written.has(file));
+    const unattributed = changed.filter((file) => !touched.includes(file));
+    if (unattributed.length > 0) {
+      this.emit(mission, "FindingCreated", { code: "WORKTREE_CHANGED_DURING_SKILL", skillId, files: unattributed, severity: "info" });
+    }
+    if (touched.length === 0) return null;
+    const created = touched.filter((file) => !before.has(file));
+    const existing = touched.filter((file) => before.has(file));
+    const quarantine = path.join(this.root, ".bmad-next", "missions", mission.id, "quarantine", skillId);
+    for (const file of created) {
+      const target = path.join(quarantine, file);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(path.join(this.root, file), target);
+      let dir = path.dirname(path.join(this.root, file));
+      while (dir.startsWith(this.root + path.sep) && fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
+        fs.rmdirSync(dir);
+        dir = path.dirname(dir);
+      }
+    }
+    this.emit(mission, "FindingCreated", { code: "SKILL_WROTE_OUTSIDE_ARTIFACTS", skillId, created, existing });
+    return [
+      `Skill wrote outside _bmad-output: ${touched.join(", ")}.`,
+      created.length > 0 ? ` Moved new files to ${path.relative(this.root, quarantine)}.` : "",
+      existing.length > 0 ? ` Existing files were left in place for review: ${existing.join(", ")}.` : "",
+    ].join("");
+  }
+
+  /** Mission input plus what earlier steps settled, so each skill builds on recorded decisions. */
+  private skillInput(mission: Mission): string {
+    const locks = (mission.forge?.locks ?? []).filter((lock) => lock.key !== "outcome").map((lock) => `- ${lock.key}: ${lock.text}`);
+    const requirements = mission.requirements.map((requirement) => `- ${requirement.id} ${requirement.title}. Acceptance: ${requirement.acceptance_criteria.join(" ") || "not declared"}`);
+    const latest = new Map<string, string>();
+    for (const artifact of mission.artifacts) {
+      // Absolute paths: _bmad-output is usually gitignored, and coding CLIs skip ignored paths when they search.
+      if (artifact.state === "complete" && artifact.path) latest.set(artifact.skillId || artifact.kind, path.isAbsolute(artifact.path) ? artifact.path : path.join(this.root, artifact.path));
+    }
+    const architecture = mission.architecture.map((item) => `- ${item.kind}: ${item.choice}`);
+    return [
+      mission.input,
+      locks.length > 0 ? `\nForge decisions:\n${locks.join("\n")}` : "",
+      requirements.length > 0 ? `\nRequirements:\n${requirements.join("\n")}` : "",
+      latest.size > 0 ? `\nCompleted BMad artifacts. Read them by these absolute paths; they may be gitignored, so a search will not list them:\n${[...latest].map(([skill, file]) => `- ${skill}: ${file}`).join("\n")}` : "",
+      architecture.length > 0 ? `\nDeclared architecture:\n${architecture.join("\n")}` : "",
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n");
+  }
+
+  /** Declarations come only from the architecture.json the headless contract validated. */
+  private applyArchitecture(mission: Mission): void {
+    const file = path.join(this.root, "_bmad-output", "architecture", mission.id, "architecture.json");
+    const declarations = readArchitectureDeclarations(file);
+    if (typeof declarations === "string") return;
+    // A new architecture run supersedes the previous one. Decisions recorded elsewhere (party-room ADRs) stay.
+    mission.architecture = [...mission.architecture.filter((item) => item.kind === "adr"), ...declarations];
+    mission.projectContext.architecture.push(...declarations.map((item) => `${item.kind}: ${item.choice}`));
+    this.emit(mission, "ArchitectureDeclared", { source: path.relative(this.root, file), declarations: declarations.map((item) => `${item.kind}:${item.choice}`) });
+  }
+
+  private requiresServedPage(mission: Mission, ticket: TicketEntry): boolean {
+    const text = [
+      mission.title,
+      mission.input,
+      ticket.title,
+      ticket.verify,
+      ...this.reviewRequirements(mission, ticket).flatMap((item) => item.acceptanceCriteria),
+    ].join("\n");
+    return /\b(web app|web application|index\.html|local persistence|localstorage|reload the (application|page))\b/i.test(text);
+  }
+
+  /**
+   * Ticketing, build, and review steps complete only from recorded outcomes: an accepted
+   * ticket tree, every ticket built, and a passing latest review for every ticket.
+   */
+  private syncWorkflow(mission: Mission): void {
+    if (mission.ticketTreeAccepted && mission.tickets.length > 0) {
+      const accepted = [...mission.artifacts].reverse().find((artifact) => artifact.kind === "ticket-tree");
+      this.setStep(mission, "bmad-preview-ticketing", "completed", `Ticket tree accepted by ${accepted?.creator ?? "a named person"}.`);
+    }
+    if (mission.tickets.length > 0) {
+      const unbuilt = mission.tickets.filter((ticket) => {
+        const plan = mission.plans.find((item) => item.ref === ticket.ref);
+        return plan?.status !== "built" && plan?.status !== "done";
+      });
+      const attempted = mission.tickets.some((ticket) => (mission.executions ?? []).some((item) => item.ticketRef === ticket.ref));
+      if (unbuilt.length === 0) this.setStep(mission, "bmad-build", "completed", `Tickets ${mission.tickets.map((ticket) => ticket.ref).join(", ")} have a built protocol and a diff.`);
+      else if (attempted) this.setStep(mission, "bmad-build", "blocked", `Not built yet: ${unbuilt.map((ticket) => ticket.ref).join(", ")}.`);
+      const latest = mission.tickets.map((ticket) => (mission.reviews ?? []).filter((item) => item.ticketRef === ticket.ref).at(-1));
+      if (latest.every((review) => review?.status === "PASS")) this.setStep(mission, "bmad-code-review", "completed", "The latest independent review of every ticket passed.");
+      else if (latest.some((review) => review !== undefined)) {
+        const open = mission.tickets.flatMap((ticket, index) => (latest[index]?.status === "PASS" ? [] : [`${ticket.ref} ${latest[index]?.status ?? "NOT_RUN"}`]));
+        this.setStep(mission, "bmad-code-review", "blocked", `Review not passed: ${open.join(", ")}.`);
+      }
+    }
+    this.phaseFromWorkflow(mission);
+  }
+
   private setStep(mission: Mission, skillId: string, status: Mission["workflow"][number]["status"], reason: string): void {
     const step = mission.workflow.find((item) => item.skillId === skillId);
     if (!step) return;
@@ -2772,6 +3456,11 @@ export class BmadControlPlane {
     const review = [...(mission.reviews ?? [])].reverse().find((item) => item.ticketRef === ticket.ref);
     const requirements = this.reviewRequirements(mission, ticket);
     const risk = mission.requirements.find((requirement) => ticket.covers.includes(requirement.id))?.risk ?? "medium";
+    const servedApp = previewDir(
+      cwd,
+      mission.architecture.filter((item) => item.kind === "layer").map((item) => item.choice),
+      changedFiles,
+    );
     const context: AttackContext = {
       missionId: mission.id,
       missionTitle: mission.title,
@@ -2785,11 +3474,14 @@ export class BmadControlPlane {
       tests: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command } : null,
       reviewFindings: (review?.findings ?? []).map((finding) => ({ id: finding.id, severity: finding.severity, message: finding.message })),
       worktree: cwd,
+      nonGoals: (mission.forge?.locks ?? []).find((lock) => lock.key === "non-goals")?.text ?? "",
+      servedApp,
     };
     if (attacker.available()) {
       this.emit(mission, "AttackStarted", { ticketRef: ticket.ref, attacker: attacker.id, promptVersion: ATTACK_PROMPT_VERSION, worktree: cwd });
     }
-    const judged = attacker.attackSync(context);
+    const webAppWithoutPage = this.requiresServedPage(mission, ticket) && !servedApp;
+    const judged = applyAttackSurface(attacker.attackSync(context), { webAppWithoutPage });
     const relative = path.join(".bmad-next", "evidence", mission.id, `${ticket.ref}-attack.json`);
     const absolute = path.join(this.root, relative);
     const attempt = (mission.attacks ?? []).filter((item) => item.ticketRef === ticket.ref).length + 1;
@@ -2811,6 +3503,7 @@ export class BmadControlPlane {
       exitCode: sealed.exitCode,
       startedAt,
       endedAt,
+      rawOutput: sealed.rawOutput,
     };
     this.writeAttackEvidence(record, absolute, requirements);
     sealed = downgradeAttack(sealed, { evidenceExists: fs.existsSync(absolute) });
@@ -2877,6 +3570,7 @@ export class BmadControlPlane {
           attempt: record.attempt,
           durationMs: record.durationMs,
           exitCode: record.exitCode,
+          rawOutput: record.rawOutput ?? null,
         },
         null,
         2,

@@ -66,10 +66,12 @@ function agent(
 }
 
 export function routeAgent(agents: AgentContract[], text: string, risk: RiskLevel): { agent: AgentContract | null; reasons: string[] } {
-  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  // Whole words or real prefixes only: "a" must not match "api", and "app" must not match "application" loosely.
+  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length >= 3);
+  const matches = (capability: string, word: string) => word === capability || (capability.length >= 3 && word.startsWith(capability)) || (word.length >= 4 && capability.startsWith(word));
   const ranked = agents
     .map((candidate) => {
-      const hits = candidate.capabilities.filter((capability) => words.some((word) => capability.includes(word) || word.includes(capability)));
+      const hits = candidate.capabilities.filter((capability) => words.some((word) => matches(capability, word)));
       const riskFit = rank(candidate.risk) >= rank(risk) ? 1 : 0;
       return { candidate, score: hits.length * 10 + riskFit, hits };
     })

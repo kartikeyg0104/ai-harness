@@ -25,6 +25,8 @@ export interface AgentRun {
   phase?: RuntimePhase;
   phases?: RuntimePhase[];
   completionSignal?: "process-exit" | "terminal-event" | null;
+  /** Raw runtime output (for OpenCode, the JSON event stream) kept as evidence of what the agent did. */
+  transcript?: string;
 }
 
 export interface AgentRuntime {
@@ -172,8 +174,13 @@ export class OpenCodeAdapter implements AgentRuntime {
     const timeout = positiveTimeout(process.env.BMAD_RUNNER_TIMEOUT, 180000);
     const args = ["run", "--pure", "--auto", "--format", "json", "--dir", context.cwd];
     if (model) args.push("--model", model);
-    args.push(`${context.prompt}\n\nWork only in ${context.cwd}. Write the implementation file, then stop. Put this exact comment in that file so the program still parses:\n// BMAD-TICKET-STATUS: built\nDo not keep exploring after the file exists. A chat reply is not completion.`);
-    const result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: openCodeStepBound() });
+    args.push(
+      `${context.prompt}\n\nWork only in ${context.cwd}. Write the implementation files and, when the ticket asks for tests, the tests and the package.json that runs them; then stop. If this ticket is a web application, ship a page the browser can open: index.html plus the JavaScript it needs for add, complete, delete, and localStorage persistence. A Node-only module without index.html is not a web app. Put this exact marker in one implementation source file where the program still parses (a // comment in JavaScript, or <!-- BMAD-TICKET-STATUS: built --> in HTML):\n// BMAD-TICKET-STATUS: built\nIf you add a test, use node:test and node:assert/strict and cover add, complete, delete, plus persistence or reload. Do not import expect, beforeAll, or afterAll. Do not keep exploring after the files exist. A chat reply is not completion.`,
+    );
+    let result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: openCodeStepBound() });
+    if (result.exitCode !== 0 && /database is locked/i.test(result.stderr)) {
+      result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: openCodeStepBound() });
+    }
     const classified = classifyOpenCodeRun({ exitCode: result.exitCode, stdout: result.stdout, timedOut: result.timedOut });
     const listed = this.runner.run("git", ["status", "--short", "--untracked-files=all"], context.cwd, 10000);
     const changedFiles = listed.exitCode === 0 ? listed.stdout.split("\n").map((line) => line.slice(3).trim()).filter((line) => line.length > 0) : [];
@@ -191,6 +198,7 @@ export class OpenCodeAdapter implements AgentRuntime {
       phase: classified.phase,
       phases: classified.phases,
       completionSignal: classified.completionSignal,
+      transcript: result.stdout.slice(-2_000_000),
     };
   }
 
@@ -209,8 +217,12 @@ export class OpenCodeAdapter implements AgentRuntime {
   }
 }
 
-/** Documented OpenCode bound. `run` exits on session idle; `--auto` approves doom_loop, so the build agent otherwise keeps taking tool steps. There is no CLI step cap. */
-export function openCodeStepBound(steps = 6): string {
+/**
+ * Documented OpenCode bound. `run` exits on session idle; `--auto` approves doom_loop, so the build agent otherwise
+ * keeps taking tool steps. There is no CLI step cap. A ticket reads its BMad artifacts and writes the implementation,
+ * a package.json, and tests; twenty steps covers that plus one failed call and a correction, and still stops a loop.
+ */
+export function openCodeStepBound(steps = 20): string {
   return JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     agent: { build: { steps } },

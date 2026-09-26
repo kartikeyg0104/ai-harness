@@ -3,7 +3,17 @@ dist/
 *.tsbuildinfo
 .tmp/
 .bmad-next/
+.bmad-demo/
+.env
 _bmad-output/
 .DS_Store
 *.vsix
 .vscode-test/
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+_bmad/render/
+
+# AI Harness runtime state and workspaces
+.harness/
+workspace/

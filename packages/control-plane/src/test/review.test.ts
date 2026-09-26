@@ -7,7 +7,7 @@ import { BmadControlPlane } from "../plane";
 import { DEFAULT_CONFIG, type CommandRunner } from "../types";
 import { processRunner } from "../runner";
 import { renderMissionControl } from "../render";
-import { DeterministicTestRuntime } from "../runtime";
+import { DeterministicTestRuntime, type AgentRuntime } from "../runtime";
 import { CommandReviewer, DeterministicReviewer, downgradeReview, judgeReview, repairTask, resolveReviewerConfig, reviewPrompt, type ReviewContext } from "../reviewer";
 
 function tempProject(): string {
@@ -214,7 +214,7 @@ test("reviewer timeout, invalid JSON, failure, and pass keep the release gate cl
   assert.match(html, /Fix with BMAD/);
   assert.match(html, /REQ-001/);
   assert.match(html, /❌/);
-  assert.match(html, /Review failed/);
+  assert.match(html, /Review FAIL/);
   const noted = failing.plane.noteReviewFalsePositive(failing.id, "1.1", failedMission.reviews.at(-1)?.findings[0]?.id ?? "");
   assert.equal(noted.falsePositiveFeedback, 1);
   assert.equal(failing.plane.mission(failing.id).reviews.at(-1)?.findings.length, noted.findings.length);
@@ -389,7 +389,7 @@ test("a repair that writes code and times out stays blocked without a fresh revi
   assert.match(html, /Repair: <strong>TIMEOUT<\/strong>/);
   assert.match(html, /Retry Budget: <strong>EXHAUSTED<\/strong>/);
   assert.match(html, /Attack: <strong>NOT RUN<\/strong>/);
-  assert.match(html, /Release: <strong>BLOCKED<\/strong>/);
+  assert.match(html, /Release: <strong>FAIL<\/strong>/);
   assert.match(plane.repairTicket(id, "1.1").message, /Retry budget/);
   assert.equal(plane.mission(id).reviews.length, 1);
 });
@@ -434,4 +434,64 @@ test("an unchanged diff is recorded when a fresh review sees the same fingerprin
   assert.equal(mission.reviews[0]?.diffFingerprint, mission.reviews[1]?.diffFingerprint);
   const events = fs.readFileSync(path.join(root, ".bmad-next", "missions", id, "events.jsonl"), "utf8");
   assert.equal(events.split("ReviewStarted").length - 1, 2);
+});
+
+test("a zero-test log forces review FAIL even when the reviewer says pass", () => {
+  const root = tempProject();
+  gitRepo(root);
+  const runner: CommandRunner = {
+    which: (bin) => (bin === "reviewer" ? "/usr/bin/reviewer" : processRunner.which(bin)),
+    run: (command, args, cwd, timeoutMs) => {
+      if (command === "npm" && args[0] === "test") {
+        return { exitCode: 0, stdout: "ℹ tests 0\nℹ pass 0\n", stderr: "", durationMs: 5, timedOut: false };
+      }
+      if (command === "reviewer") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            status: "PASS",
+            summary: "Looks fine.",
+            findings: [],
+            criteria: [{ requirementId: "REQ-001", criterion: "health", status: "PASS" }],
+            tests: { coversChangedBehavior: "PASS", wouldCatchRegression: "PASS", edgeCases: "PASS" },
+          }),
+          stderr: "",
+          durationMs: 5,
+          timedOut: false,
+        };
+      }
+      return processRunner.run(command, args, cwd, timeoutMs);
+    },
+  };
+  const runtime: AgentRuntime = {
+    id: "deterministic-test-provider",
+    capabilities: () => Promise.resolve(["test-fixture"]),
+    availability: () => "CONFIGURED",
+    start: (context) => Promise.resolve(runtime.begin(context)),
+    resume: () => Promise.resolve({ id: "zero-tests", runtimeId: "deterministic-test-provider", status: "failed", message: "not resumed", exitCode: null }),
+    cancel: () => Promise.resolve(),
+    begin: (context) => {
+      fs.writeFileSync(path.join(context.cwd, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+      fs.writeFileSync(path.join(context.cwd, "health.js"), "module.exports = { ok: true };\n// BMAD-TICKET-STATUS: built\n");
+      return {
+        id: "zero-tests",
+        runtimeId: "deterministic-test-provider",
+        status: "completed",
+        message: "wrote a package with no tests",
+        exitCode: 0,
+        changedFiles: ["package.json", "health.js"],
+        phase: "COMPLETED",
+        completionSignal: "process-exit",
+      };
+    },
+  };
+  const { plane, id } = ready(root, undefined, runner);
+  plane.registerRuntime(runtime);
+  plane.updateConfig({ defaultRuntime: "deterministic-test-provider", reviewer: { command: "reviewer", args: ["{prompt}"], timeoutMs: 5000 } });
+  const built = plane.executeTicket(id, "1.1");
+  assert.equal(built.status, "blocked");
+  const mission = plane.mission(id);
+  assert.equal(mission.evidence.find((record) => record.kind === "unit")?.result, "fail");
+  assert.equal(mission.reviews.at(-1)?.status, "FAIL");
+  assert.equal(mission.reviews.at(-1)?.findings.some((finding) => finding.id === "REV-TESTS"), true);
 });
