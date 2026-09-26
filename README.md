@@ -26,11 +26,19 @@ make clean   # remove build output and harness workspaces
 | `@path/to/issue.md` | Reads the issue text from a file |
 | Plain text, ended by a line containing only `.` | Treats the text as the issue, in a new repository or the one set with `repo <url or path>` |
 
-For each issue the harness creates a BMAD mission. It plans (spec, PRD, architecture), proposes tickets, builds each ticket with the coding agent, runs the tests, has a separate read-only reviewer and attacker inspect the change, repairs it when those gates fail, and evaluates the release gate. It stops when a person must decide something. In an interactive session it asks the question. With `make run AUTO=1` or piped input it takes the defaults. Results go to `workspace/results/<mission-id>/`: one `ticket-<ref>.patch` per ticket plus `summary.json`. The patched worktree stays under `workspace/<repo>/.bmad-next/worktrees/`.
+For each issue the harness creates a BMAD mission. With the default `"workflow": "issue"` it runs the lean fix path:
+1. The model runner writes a spec.
+2. The issue becomes one requirement and one ticket.
+3. The coding agent builds the ticket in an isolated git worktree.
+4. The repository's own tests run: `npm test`, pytest, `go test`, `cargo test`, or `make test`. A Python repository gets its own virtual environment under `workspace/.venvs/`.
+5. A separate read-only reviewer and attacker inspect the diff. Failures go back to the agent as a repair with the findings, within a retry budget.
+6. The architecture and traceability checks run, then the release gate.
+
+`"workflow": "full"` (or `HARNESS_WORKFLOW=full`) uses the adaptive BMAD chain instead: forge, spec, PRD, architecture, ticketing, and so on. The harness stops when a person must decide something, such as accepting the ticket tree or approving the release. An interactive session asks. With `make run AUTO=1` or piped input the harness takes the defaults, and it leaves release approval pending. Results go to `workspace/results/<mission-id>/`: one `ticket-<ref>.patch` per ticket (the change and its tests) plus `summary.json`. The patched worktree stays under `<repo>/.bmad-next/worktrees/`.
 
 Non-interactive options: `make run ISSUE=https://github.com/o/r/issues/1` starts with that issue. `echo "issue text" | make run` runs once and exits. `make run REPO=<url|path>` applies plain-text issues to that repository.
 
-**Model and credential.** The model is defined in [`harness.config.json`](harness.config.json): provider `nvidia`, model `openai/gpt-oss-20b`, temperature `0`, and text-only. `AI_PROVIDER`, `AI_MODEL`, and `AI_BASE_URL` override those fields without editing any file. Set `AI_PROVIDER=openai-compatible` with `AI_BASE_URL` to use any OpenAI-compatible endpoint. The credential is read only from `AI_API_KEY`. The harness writes `.harness/opencode.json` (gitignored), which refers to the key as `{env:AI_API_KEY}`, so the value never reaches disk, a log, or a command line. The coding agent, reviewer, and attacker all use that one model. `GITHUB_TOKEN` is optional; it raises GitHub's anonymous API rate limit.
+**Model and credential.** The model is defined in [`harness.config.json`](harness.config.json): provider `nvidia`, model `openai/gpt-oss-20b` (text-only), temperature `0`, and a 600 s timeout per model run. `AI_PROVIDER`, `AI_MODEL`, and `AI_BASE_URL` override those fields without editing any file. Set `AI_PROVIDER=openai-compatible` with `AI_BASE_URL` to use any OpenAI-compatible endpoint. The credential is read only from `AI_API_KEY`. The harness writes `.harness/opencode.json` (gitignored), which refers to the key as `{env:AI_API_KEY}`, so the value never reaches disk, a log, or a command line. The coding agent, reviewer, and attacker all use that one model. `GITHUB_TOKEN` is optional; it raises GitHub's anonymous API rate limit.
 
 ## What this repository runs
 

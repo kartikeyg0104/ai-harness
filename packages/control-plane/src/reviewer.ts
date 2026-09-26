@@ -22,7 +22,7 @@ export interface ReviewContext {
   headCommit: string;
   changedFiles: string[];
   diff: string;
-  testEvidence: { result: string; exitCode: number | null; command: string; edgeCases?: "present" | "missing" } | null;
+  testEvidence: { result: string; exitCode: number | null; command: string; edgeCases?: "present" | "missing"; failing?: string[]; output?: string } | null;
   followsRepair?: boolean;
   repairAttempt?: number;
 }
@@ -171,7 +171,7 @@ export function reviewPrompt(context: ReviewContext): string {
     "Architecture:",
     JSON.stringify(context.architecture),
     "",
-    "Test evidence:",
+    "Test evidence (failing and output are the real run; name that cause, not a guessed one):",
     JSON.stringify(context.testEvidence),
     "",
     "Changed files:",

@@ -267,6 +267,7 @@ async function ask(session: Session, prompt: string, fallback: string): Promise<
 /** Runs autopilot and answers the decisions it hands back, within a bounded number of rounds. */
 async function drive(session: Session, plane: BmadControlPlane, missionId: string): Promise<AutopilotResult> {
   let result: AutopilotResult | null = null;
+  let resumed = false;
   for (let round = 1; round <= MAX_ROUNDS; round += 1) {
     result = await plane.autopilot(missionId, { log: (line) => say(`  ${line}`), stopRequested: () => session.stop });
     const mission = plane.mission(missionId);
@@ -285,6 +286,12 @@ async function drive(session: Session, plane: BmadControlPlane, missionId: strin
       const answer = await ask(session, "Accept this ticket tree? [Y/n]>", "y");
       if (/^n/i.test(answer)) return result;
       plane.acceptTicketTree(missionId, session.operator);
+      continue;
+    }
+    // A planning skill that missed its output contract gets one more autopilot pass; the model is not deterministic.
+    if (result.status === "blocked" && !resumed && /did not complete/.test(result.reason) && !session.stop) {
+      resumed = true;
+      say("  Resuming autopilot once for the planning step that did not complete.");
       continue;
     }
     if (result.status === "needs-release-approval") {

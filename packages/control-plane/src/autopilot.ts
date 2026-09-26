@@ -69,7 +69,7 @@ export async function runAutopilot(plane: BmadControlPlane, missionId: string, h
     if (stopped()) return finish("stopped", "Stop requested.");
     if (DRIVEN_ELSEWHERE.has(step.skillId) || step.skillId.startsWith("bmad-next:") || step.status === "completed" || step.status === "skipped") continue;
     let status: string = step.status;
-    for (let attempt = 1; attempt <= 2 && status !== "completed"; attempt += 1) {
+    for (let attempt = 1; attempt <= 3 && status !== "completed"; attempt += 1) {
       say(`Running ${step.skillId} (attempt ${attempt}).`);
       const current = plane.runSkill(missionId, step.skillId).workflow.find((item) => item.skillId === step.skillId);
       status = current?.status ?? "blocked";

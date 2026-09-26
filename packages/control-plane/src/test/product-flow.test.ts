@@ -599,7 +599,7 @@ test("the build prompt lists the files that must exist and forbids dependencies 
   assert.match(context, /Do not stop until every one of these exists and npm test passes:/);
   assert.match(context, /- webapp\/index\.html \(the page the browser opens\)/);
   assert.match(context, /- webapp\/package\.json whose test script names test files that exist/);
-  assert.match(context, /use only Node built-ins and plain browser JavaScript, with no dependencies/);
+  assert.match(context, /Test dependencies declared in package.json are installed before npm test/);
 });
 
 test("an autopilot lock left by a process that has exited does not block the next run", async () => {
@@ -612,4 +612,45 @@ test("an autopilot lock left by a process that has exited does not block the nex
   fs.writeFileSync(lock, `999999\n${Date.now()}\n`);
   assert.equal(acquireAutopilotLock(root, "m1"), true, "a dead owner's lock is taken over");
   assert.equal(fs.readFileSync(lock, "utf8").split("\n")[0], String(process.pid));
+});
+
+test("a reviewer is given why the tests failed, from the run's own log", () => {
+  const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../../../.tmp"), "test-cause-"));
+  const plane = new BmadControlPlane(root);
+  const failure = (plane as unknown as { testFailure(unit: unknown): { failing?: string[]; output?: string } }).testFailure.bind(plane);
+  const crash = path.join(root, "crash.log");
+  fs.writeFileSync(crash, "> node test.js\nnpm warn Unknown user config\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'jsdom' imported from /w/test.js\n    at packageResolve (node:internal)\n");
+  const crashed = failure({ result: "fail", artifact: crash });
+  assert.match(crashed.output ?? "", /Cannot find package 'jsdom'/);
+  assert.doesNotMatch(crashed.output ?? "", /npm warn|packageResolve/);
+  const assertions = path.join(root, "assert.log");
+  fs.writeFileSync(assertions, "✖ toggle (1ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n      at t (/w/webapp/todo.test.js:9:3)\n");
+  assert.deepEqual(failure({ result: "fail", artifact: assertions }).failing, ["✖ toggle — AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: (webapp/todo.test.js:9)"]);
+  assert.deepEqual(failure({ result: "pass", artifact: assertions }), {});
+});
+
+test("declared test dependencies are installed with scripts off before npm test, and the install is logged", () => {
+  const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../../../.tmp"), "deps-"));
+  const calls: string[][] = [];
+  const plane = new BmadControlPlane(root, {
+    runner: {
+      which: () => "/usr/bin/npm",
+      run: (command: string, args: string[]) => {
+        calls.push([command, ...args]);
+        return { exitCode: 0, stdout: "added 1 package", stderr: "", durationMs: 1, timedOut: false };
+      },
+    },
+  });
+  const install = (plane as unknown as { installDependencies(dir: string): string | null }).installDependencies.bind(plane);
+  const dir = path.join(root, "webapp");
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+  assert.equal(install(dir), null, "nothing declared, nothing installed");
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" }, devDependencies: { jsdom: "^25.0.0" } }));
+  const log = install(dir);
+  assert.deepEqual(calls.at(-1), ["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"]);
+  assert.match(log ?? "", /\(jsdom\)[\s\S]*added 1 package[\s\S]*install exit 0/);
+  fs.mkdirSync(path.join(dir, "node_modules", "jsdom"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "node_modules", "jsdom", "package.json"), "{}");
+  assert.equal(install(dir), null, "already installed");
 });

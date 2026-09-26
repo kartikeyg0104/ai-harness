@@ -2685,12 +2685,13 @@ export class BmadControlPlane {
       if (plan) {
         this.emit(mission, "TestStarted", { ticketRef: ticket.ref, command: testCommand });
         const started = this.now().toISOString();
+        const install = plan.command === "npm" ? this.installDependencies(plan.dir) : null;
         const result = this.runner.run(plan.command, plan.args, plan.dir, plan.command === "npm" ? 120000 : 300000);
         const finished = this.now().toISOString();
         const relative = path.join(".bmad-next", "evidence", mission.id, `${ticket.ref}-unit.log`);
         const absolute = path.join(this.root, relative);
         fs.mkdirSync(path.dirname(absolute), { recursive: true });
-        fs.writeFileSync(absolute, `${result.stdout}\n${result.stderr}`);
+        fs.writeFileSync(absolute, `${install ? `${install}\n` : ""}${result.stdout}\n${result.stderr}`);
         const passed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout) && nonNodeRanTests(result.stdout);
         this.recordEvidence(mission.id, {
           requirement_id: ticket.covers[0],
@@ -2952,7 +2953,7 @@ export class BmadControlPlane {
       headCommit: head,
       changedFiles,
       diff: this.captureDiff(cwd, changedFiles),
-      testEvidence: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command, edgeCases: edge.status } : null,
+      testEvidence: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command, edgeCases: edge.status, ...this.testFailure(unit) } : null,
       followsRepair: (mission.repairs ?? []).some((item) => item.ticketRef === ticket.ref && item.status === "COMPLETED"),
       repairAttempt: [...(mission.repairs ?? [])].reverse().find((item) => item.ticketRef === ticket.ref && item.status === "COMPLETED")?.attempt,
     };
@@ -3259,6 +3260,32 @@ export class BmadControlPlane {
       .join("\n");
   }
 
+  /**
+   * Declared dependencies are installed before the tests, with lifecycle scripts off, so a test that imports one is
+   * judged on its assertions rather than on a missing package. Returns the install log, or null when nothing is declared.
+   */
+  private installDependencies(dir: string): string | null {
+    const manifest = path.join(dir, "package.json");
+    let declared: string[] = [];
+    try {
+      const parsed = JSON.parse(fs.readFileSync(manifest, "utf8")) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+      declared = [...Object.keys(parsed.dependencies ?? {}), ...Object.keys(parsed.devDependencies ?? {})];
+    } catch {
+      return null;
+    }
+    if (declared.length === 0 || declared.every((name) => fs.existsSync(path.join(dir, "node_modules", name, "package.json")))) return null;
+    const installed = this.runner.run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], dir, 180000);
+    return [`$ npm install --ignore-scripts --no-audit --no-fund --no-package-lock (${declared.join(", ")})`, installed.stdout.trim(), installed.stderr.trim(), `install exit ${String(installed.exitCode)}`].filter((part) => part).join("\n");
+  }
+
+  /** Why a unit run failed, from its own log: a reviewer or attacker told only "fail" guesses the cause. */
+  private testFailure(unit: EvidenceRecord): { failing?: string[]; output?: string } {
+    if (unit.result !== "fail" || !unit.artifact || !fs.existsSync(unit.artifact)) return {};
+    const log = fs.readFileSync(unit.artifact, "utf8").replace(/\u001b\[[0-9;]*m/g, "");
+    const failing = failingTestSummary(log);
+    return failing.length > 0 ? { failing } : { output: redactSecrets(log.split("\n").filter((line) => line.trim() && !/^\s+at /.test(line) && !/npm warn/i.test(line)).slice(-25).join("\n")).slice(-2500) };
+  }
+
   private captureDiff(cwd: string, changedFiles: string[]): string {
     const tracked = this.runner.run("git", ["diff", "HEAD", "--"], cwd, 10000);
     const parts = [tracked.stdout];
@@ -3350,7 +3377,7 @@ export class BmadControlPlane {
             ...components.map((file) => `- ${file} (the page the browser opens), with every script and stylesheet it loads`),
             ...layers.map((layer) => `- ${layer}/package.json whose test script names test files that exist`),
             ...layers.map((layer) => `- the test files in ${layer}, using node:test and node:assert`),
-            "Nothing is installed before tests or the browser run: use only Node built-ins and plain browser JavaScript, with no dependencies.",
+            "Prefer Node built-ins and plain browser JavaScript. Test dependencies declared in package.json are installed before npm test; the browser serves the page as static files, so the page itself must not import packages.",
           ].join("\n")
         : "",
       artifacts.length > 0 ? `BMad artifacts for this mission (read them):\n${artifacts.join("\n")}` : "",
@@ -3569,7 +3596,7 @@ export class BmadControlPlane {
       risk,
       changedFiles,
       diff,
-      tests: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command } : null,
+      tests: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command, ...this.testFailure(unit) } : null,
       reviewFindings: (review?.findings ?? []).map((finding) => ({ id: finding.id, severity: finding.severity, message: finding.message })),
       worktree: cwd,
       nonGoals: (mission.forge?.locks ?? []).find((lock) => lock.key === "non-goals")?.text ?? "",

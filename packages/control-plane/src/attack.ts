@@ -21,7 +21,7 @@ export interface AttackContext {
   risk: string;
   changedFiles: string[];
   diff: string;
-  tests: { result: string; exitCode: number | null; command: string } | null;
+  tests: { result: string; exitCode: number | null; command: string; failing?: string[]; output?: string } | null;
   reviewFindings: Array<{ id: string; severity: string; message: string }>;
   worktree: string;
   nonGoals?: string;
