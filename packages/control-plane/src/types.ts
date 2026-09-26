@@ -80,6 +80,7 @@ export type EventType =
   | "AgentStarted"
   | "ToolCalled"
   | "ArtifactCreated"
+  | "BaselineTested"
   | "TestStarted"
   | "TestPassed"
   | "TestFailed"

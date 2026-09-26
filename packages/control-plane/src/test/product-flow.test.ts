@@ -599,7 +599,7 @@ test("the build prompt lists the files that must exist and forbids dependencies 
   assert.match(context, /Do not stop until every one of these exists and npm test passes:/);
   assert.match(context, /- webapp\/index\.html \(the page the browser opens\)/);
   assert.match(context, /- webapp\/package\.json whose test script names test files that exist/);
-  assert.match(context, /Test dependencies declared in package.json are installed before npm test/);
+  assert.match(context, /Declared test dependencies are freshly installed before npm test \(never edit node_modules\)/);
 });
 
 test("an autopilot lock left by a process that has exited does not block the next run", async () => {
@@ -650,7 +650,8 @@ test("declared test dependencies are installed with scripts off before npm test,
   const log = install(dir);
   assert.deepEqual(calls.at(-1), ["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"]);
   assert.match(log ?? "", /\(jsdom\)[\s\S]*added 1 package[\s\S]*install exit 0/);
-  fs.mkdirSync(path.join(dir, "node_modules", "jsdom"), { recursive: true });
-  fs.writeFileSync(path.join(dir, "node_modules", "jsdom", "package.json"), "{}");
-  assert.equal(install(dir), null, "already installed");
+  fs.mkdirSync(path.join(dir, "node_modules", "jsdom", "lib"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "node_modules", "jsdom", "lib", "api.js"), "export class JSDOM {}");
+  install(dir);
+  assert.equal(fs.existsSync(path.join(dir, "node_modules", "jsdom", "lib", "api.js")), false, "an edited node_modules is wiped before the clean install");
 });

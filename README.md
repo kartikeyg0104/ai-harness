@@ -29,14 +29,17 @@ make clean   # remove build output and harness workspaces
 For each issue the harness creates a BMAD mission. With the default `"workflow": "issue"` it runs the lean fix path:
 1. The model runner writes a spec.
 2. The issue becomes one requirement and one ticket.
-3. The coding agent builds the ticket in an isolated git worktree.
-4. The repository's own tests run: `npm test`, pytest, `go test`, `cargo test`, or `make test`. A Python repository gets its own virtual environment under `workspace/.venvs/`.
-5. A separate read-only reviewer and attacker inspect the diff. Failures go back to the agent as a repair with the findings, within a retry budget.
-6. The architecture and traceability checks run, then the release gate.
+3. The repository's tests run once on the untouched worktree (the baseline). If they already fail, for example a Jest `jest.config.ts` that needs an uninstalled `ts-node`, the build prompt carries the failure and a diagnosis, so the fix to the test setup becomes part of the ticket. The reviewer is told that fix is in scope.
+4. The coding agent builds the ticket in an isolated git worktree.
+5. The repository's own tests run: `npm test`, pytest, `go test`, `cargo test`, or `make test`. In an npm workspace monorepo whose root has no test script, the workspace package that has one runs (`npm test --workspaces --if-present` when several do), and the build prompt names that package, its framework, and its existing test files. Dependencies install with `npm ci` from the repository's lockfile, with lifecycle scripts off; a change that adds a dependency falls back to a lockless install. After the tests pass, each package the change touches runs its own `npm run build` (`tsc`, `next build`), as the repository's CI does; a build failure fails the ticket even when every test passed, and tracked files a build regenerates, such as `next-env.d.ts`, are restored so they never enter the patch. A Python repository gets its own virtual environment under `workspace/.venvs/`.
+6. A separate read-only reviewer and attacker inspect the diff. Failures go back to the agent as a repair with the findings, within a retry budget.
+7. The architecture and traceability checks run, then the release gate.
 
 `"workflow": "full"` (or `HARNESS_WORKFLOW=full`) uses the adaptive BMAD chain instead: forge, spec, PRD, architecture, ticketing, and so on. The harness stops when a person must decide something, such as accepting the ticket tree or approving the release. An interactive session asks. With `make run AUTO=1` or piped input the harness takes the defaults, and it leaves release approval pending. Results go to `workspace/results/<mission-id>/`: one `ticket-<ref>.patch` per ticket (the change and its tests) plus `summary.json`. The patched worktree stays under `<repo>/.bmad-next/worktrees/`.
 
 Non-interactive options: `make run ISSUE=https://github.com/o/r/issues/1` starts with that issue. `echo "issue text" | make run` runs once and exits. `make run REPO=<url|path>` applies plain-text issues to that repository.
+
+**Provider outages.** A planning step gets three attempts. When all three time out with no reply from the model, the run stops with `Provider blocked: ...` and does not start another pass; a step that answered but missed its output contract still gets one more autopilot pass.
 
 **Model and credential.** The model is defined in [`harness.config.json`](harness.config.json): provider `nvidia`, model `openai/gpt-oss-20b` (text-only), temperature `0`, and a 600 s timeout per model run. `AI_PROVIDER`, `AI_MODEL`, and `AI_BASE_URL` override those fields without editing any file. Set `AI_PROVIDER=openai-compatible` with `AI_BASE_URL` to use any OpenAI-compatible endpoint. The credential is read only from `AI_API_KEY`. The harness writes `.harness/opencode.json` (gitignored), which refers to the key as `{env:AI_API_KEY}`, so the value never reaches disk, a log, or a command line. The coding agent, reviewer, and attacker all use that one model. `GITHUB_TOKEN` is optional; it raises GitHub's anonymous API rate limit.
 

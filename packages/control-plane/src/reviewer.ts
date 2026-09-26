@@ -22,7 +22,7 @@ export interface ReviewContext {
   headCommit: string;
   changedFiles: string[];
   diff: string;
-  testEvidence: { result: string; exitCode: number | null; command: string; edgeCases?: "present" | "missing"; failing?: string[]; output?: string } | null;
+  testEvidence: { result: string; exitCode: number | null; command: string; edgeCases?: "present" | "missing"; failing?: string[]; output?: string; baselineFailed?: boolean } | null;
   followsRepair?: boolean;
   repairAttempt?: number;
 }
@@ -154,6 +154,7 @@ export function reviewPrompt(context: ReviewContext): string {
     "Set tests.coversChangedBehavior, tests.wouldCatchRegression, and tests.edgeCases to PASS, FAIL, or UNCLEAR.",
     "If Test evidence records a passing run and edgeCases is present, set tests.edgeCases to PASS unless you found a concrete missing case — then FAIL with a finding. Do not mark UNCLEAR when that evidence is already recorded.",
     "For an architecture violation, add a finding with category architecture, declaredRule, observedCode, file, and severity.",
+    "If Test evidence has baselineFailed true, the test command already failed before this change, so the diff must also fix the test setup; a minimal fix there (such as a test config file) is in scope, not an unrelated change.",
     "",
     `promptVersion: ${REVIEW_PROMPT_VERSION}`,
     `Mission: ${context.missionTitle}`,

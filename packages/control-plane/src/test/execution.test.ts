@@ -628,3 +628,28 @@ test("an opencode run with no session id or no change is not retried forever", (
   adapter.begin({ missionId: "m", ticketRef: "1.1", agent: "Developer", cwd, prompt: "build" });
   assert.equal(calls.length, 3, "one run and at most two continuations");
 });
+
+test("a run cut short by one malformed tool call continues its session instead of failing the attempt", () => {
+  const cwd = path.join(tempProject(), ".bmad-next", "worktrees", "m", "1.1");
+  fs.mkdirSync(cwd, { recursive: true });
+  const calls: string[][] = [];
+  let status = "?? index.html\n";
+  fs.writeFileSync(path.join(cwd, "index.html"), "<p>");
+  const adapter = new OpenCodeAdapter({
+    which: () => "/usr/bin/opencode",
+    run: (command, args) => {
+      if (command === "git") return { exitCode: 0, stdout: args[0] === "status" ? status : "", stderr: "", durationMs: 1, timedOut: false };
+      calls.push(args);
+      if (calls.length === 1) {
+        return { exitCode: 1, stdout: '{"type":"text","sessionID":"ses_q","part":{"text":"editing"}}\n{"type":"error","sessionID":"ses_q","error":{"data":{"message":"{\\"message\\":\\"unexpected tokens remaining in message header\\",\\"type\\":\\"BadRequestError\\",\\"code\\":400}"}}}', stderr: "", durationMs: 1, timedOut: false };
+      }
+      fs.writeFileSync(path.join(cwd, "index.html"), "<!-- BMAD-TICKET-STATUS: built -->");
+      status = "?? index.html\n";
+      return { exitCode: 0, stdout: '{"type":"step_finish","sessionID":"ses_q","part":{"reason":"stop"}}', stderr: "", durationMs: 1, timedOut: false };
+    },
+  });
+  const run = adapter.begin({ missionId: "m", ticketRef: "1.1", agent: "Developer", cwd, prompt: "build" });
+  assert.equal(calls.length, 2);
+  assert.match(calls[1]?.at(-1) ?? "", /malformed and rejected/);
+  assert.equal(run.status, "completed");
+});

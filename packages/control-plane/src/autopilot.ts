@@ -69,11 +69,20 @@ export async function runAutopilot(plane: BmadControlPlane, missionId: string, h
     if (stopped()) return finish("stopped", "Stop requested.");
     if (DRIVEN_ELSEWHERE.has(step.skillId) || step.skillId.startsWith("bmad-next:") || step.status === "completed" || step.status === "skipped") continue;
     let status: string = step.status;
+    let timeouts = 0;
+    let attempts = 0;
     for (let attempt = 1; attempt <= 3 && status !== "completed"; attempt += 1) {
       say(`Running ${step.skillId} (attempt ${attempt}).`);
       const current = plane.runSkill(missionId, step.skillId).workflow.find((item) => item.skillId === step.skillId);
       status = current?.status ?? "blocked";
+      attempts += 1;
+      if (status !== "completed" && /^timeout\b/i.test(current?.reason ?? "")) timeouts += 1;
       say(`${step.skillId}: ${status}${current?.reason ? ` — ${current.reason}` : ""}`);
+    }
+    // Every attempt timing out is the model provider, not the model missing its contract: another pass would only
+    // wait out the same timeouts again, so the run stops and says so.
+    if (status !== "completed" && timeouts === attempts) {
+      return finish("blocked", `Provider blocked: ${step.skillId} timed out on all ${String(attempts)} attempts without a reply from the model. Check the provider and run again.`);
     }
     if (status !== "completed") return finish("blocked", `${step.skillId} did not complete. See its artifact and provenance.`);
   }

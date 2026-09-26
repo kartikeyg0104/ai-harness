@@ -82,7 +82,7 @@ import type {
 import { LOOP_TRANSITIONS, emptyBrain, emptyContext } from "./types";
 import { CommandModelRunner, redactSecrets } from "./model-runner";
 import { runAutopilot, type AutopilotHooks, type AutopilotResult } from "./autopilot";
-import { detectTestCommand, nonNodeRanTests, type TestCommand } from "./test-command";
+import { buildPackages, describeNpmTests, detectTestCommand, nonNodeRanTests, npmLockRoot, npmTestPlan, type TestCommand } from "./test-command";
 import { PREVIEW_MARKER, previewDir, startPreview, withPreview, type PreviewServer } from "./preview";
 import { PLAN_PROMPT_VERSION, appSource, parsePlan, planPrompt } from "./verification-plan";
 import { extractJson } from "./reviewer";
@@ -169,6 +169,39 @@ export function testPackageDir(worktree: string, changedFiles: string[]): string
     }
     if (dir === root || !dir.startsWith(root)) return root;
   }
+}
+
+/**
+ * What a failing baseline test run most likely needs, for the common setup failures a model misreads. Empty when
+ * the output matches none of them; the raw output is always given alongside.
+ */
+export function baselineDiagnosis(output: string, dir: string, worktree: string): string[] {
+  const relative = (file: string) => path.relative(worktree, file).split(path.sep).join("/");
+  const hints: string[] = [];
+  const jestTs = path.join(dir, "jest.config.ts");
+  if (/'ts-node' is required for the TypeScript configuration files|Failed to parse the TypeScript config file/i.test(output) && fs.existsSync(jestTs)) {
+    let esm = false;
+    try {
+      esm = (JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as { type?: string }).type === "module";
+    } catch {
+      esm = false;
+    }
+    hints.push(
+      `Cause: Jest can only read ${relative(jestTs)} through ts-node, which is not installed. Fix: rename it to ${relative(path.join(dir, "jest.config.js"))}: write ${relative(path.join(dir, "jest.config.js"))} as plain JavaScript with the same options (drop the \`import type\` line and the \`: Config\` annotation, and ${esm ? "keep `export default config;`, the package is an ES module" : "end with `module.exports = config;`"}), then delete ${relative(jestTs)}. Jest refuses to run while both files exist. Do not add ts-node or change the test script.`,
+    );
+  }
+  const missing = [...output.matchAll(/Cannot find (?:module|package) '([^'./][^']*)'/g)].map((match) => match[1] ?? "").filter((name) => name && name !== "ts-node");
+  if (missing.length > 0) {
+    const names = [...new Set(missing.map((name) => (name.startsWith("@") ? name.split("/").slice(0, 2).join("/") : name.split("/")[0])))];
+    hints.push(`Cause: the tests import ${names.join(", ")}, which no package.json declares. Fix: add ${names.length === 1 ? "it" : "them"} to devDependencies of ${relative(path.join(dir, "package.json")) || "package.json"}.`);
+  }
+  if (/Multiple configurations found/.test(output)) {
+    const configs = ["jest.config.ts", "jest.config.js", "jest.config.mjs", "jest.config.cjs", "jest.config.json"].filter((name) => fs.existsSync(path.join(dir, name))).map((name) => relative(path.join(dir, name)));
+    const keep = configs.find((file) => !file.endsWith(".ts")) ?? configs[0];
+    hints.push(`Cause: Jest found more than one config file${configs.length > 0 ? ` (${configs.join(", ")})` : ""} and refuses to run. Fix: keep ${keep ?? "one"} and delete the others${configs.some((file) => file.endsWith(".ts")) ? "; the .ts one needs ts-node, which is not installed" : ""}.`);
+  }
+  if (/No tests found, exiting with code 1/.test(output)) hints.push("Cause: the test runner's file pattern matches no test file. Put tests where its testMatch or include pattern looks.");
+  return hints;
 }
 
 /**
@@ -646,6 +679,8 @@ export class BmadControlPlane {
     this.noteExecution(mission, ticketRef, { skillId: "bmad-build", agent, runtime, worktree: worktreePath, status: "running", attempts, artifact: null, verification: "not-run" });
     saveMission(this.root, mission);
     const before = this.runner.run("git", ["rev-parse", "HEAD"], worktreePath, 10000);
+    const earlier = this.listChanged(worktreePath);
+    const baseline = earlier.length === 0 ? this.baselineTests(mission, ticketRef, worktreePath) : this.retryContext(mission, ticketRef, earlier);
     let run: ReturnType<typeof selected.begin>;
     try {
       run = selected.begin({
@@ -653,7 +688,7 @@ export class BmadControlPlane {
         ticketRef,
         agent,
         cwd: worktreePath,
-        prompt: [ticket.title, ticket.description, ticket.verify, this.buildContext(mission)].filter((part) => part.trim().length > 0).join("\n\n"),
+        prompt: [ticket.title, ticket.description, ticket.verify, this.buildContext(mission), baseline ?? ""].filter((part) => part.trim().length > 0).join("\n\n"),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1387,7 +1422,9 @@ export class BmadControlPlane {
     const unitLog = failedUnit?.artifact && fs.existsSync(failedUnit.artifact) ? fs.readFileSync(failedUnit.artifact, "utf8") : "";
     const failing = unitLog ? failingTestSummary(unitLog) : [];
     const unitOutput = unitLog.slice(-1500);
+    const diagnosis = unitLog ? baselineDiagnosis(unitLog, this.testPlan(worktreePath, changedFiles).plan?.dir ?? worktreePath, worktreePath) : [];
     const prompt = [
+      diagnosis.length > 0 ? `The test command itself fails before running the tests.\n${diagnosis.join("\n")}` : "",
       failing.length > 0
         ? `Fix these failing tests first (${failedUnit?.command ?? "npm test"}). Fix the cause in the code or in the test setup; do not delete or weaken assertions:\n${failing.join("\n")}`
         : "",
@@ -2669,30 +2706,24 @@ export class BmadControlPlane {
   private verifyBuiltTicket(mission: Mission, ticket: TicketEntry, cwd: string): TicketExecution["verification"] {
     this.emit(mission, "VerificationStarted", { ticketRef: ticket.ref });
     const changed = this.listChanged(cwd);
-    const testDir = testPackageDir(cwd, changed);
-    const packagePath = path.join(testDir, "package.json");
-    const where = path.relative(cwd, testDir);
-    const parsedPackage = fs.existsSync(packagePath) ? (JSON.parse(fs.readFileSync(packagePath, "utf8")) as { scripts?: { test?: string } }) : null;
-    const npmScript = parsedPackage?.scripts?.test;
-    // Projects without an npm test script (Python, Go, Rust, make) use their own runner.
-    const plan: TestCommand | null =
-      typeof npmScript === "string" && npmScript.trim()
-        ? { command: "npm", args: ["test"], dir: testDir, label: where ? `npm test (in ${where})` : "npm test" }
-        : detectTestCommand(cwd, changed);
+    const { plan, manifest } = this.testPlan(cwd, changed);
     const testCommand = plan?.label ?? "npm test";
     let verification: TicketExecution["verification"] = "not-run";
-    if (parsedPackage || plan) {
+    if (manifest || plan) {
       if (plan) {
         this.emit(mission, "TestStarted", { ticketRef: ticket.ref, command: testCommand });
         const started = this.now().toISOString();
-        const install = plan.command === "npm" ? this.installDependencies(plan.dir) : null;
-        const result = this.runner.run(plan.command, plan.args, plan.dir, plan.command === "npm" ? 120000 : 300000);
+        const { install, result } = this.runTests(plan, cwd);
         const finished = this.now().toISOString();
         const relative = path.join(".bmad-next", "evidence", mission.id, `${ticket.ref}-unit.log`);
         const absolute = path.join(this.root, relative);
         fs.mkdirSync(path.dirname(absolute), { recursive: true });
-        fs.writeFileSync(absolute, `${install ? `${install}\n` : ""}${result.stdout}\n${result.stderr}`);
-        const passed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout) && nonNodeRanTests(result.stdout);
+        const testsPassed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout) && nonNodeRanTests(result.stdout);
+        const builds = testsPassed && plan.command === "npm" ? this.runBuilds(cwd, changed) : [];
+        const passed = testsPassed && builds.every((build) => build.ok);
+        const buildLog = builds.map((build) => `\n$ ${build.label}\n${build.output}\nbuild exit ${String(build.exitCode)}${build.timedOut ? " (timed out)" : ""}`).join("");
+        const failedBuild = builds.find((build) => !build.ok);
+        fs.writeFileSync(absolute, `${install ? `${install}\n` : ""}${result.stdout}\n${result.stderr}${buildLog}${failedBuild ? `\nBuild failed: ${failedBuild.label}. The tests passed; the code does not compile.\n` : ""}`);
         this.recordEvidence(mission.id, {
           requirement_id: ticket.covers[0],
           story_id: ticket.ref,
@@ -2703,8 +2734,8 @@ export class BmadControlPlane {
           runner: "process",
           started_at: started,
           finished_at: finished,
-          exit_code: result.exitCode,
-          command: testCommand,
+          exit_code: failedBuild ? failedBuild.exitCode : result.exitCode,
+          command: [testCommand, ...builds.map((build) => build.label)].join(" && "),
           artifact: absolute,
         });
         verification = passed ? "pass" : "fail";
@@ -2953,7 +2984,7 @@ export class BmadControlPlane {
       headCommit: head,
       changedFiles,
       diff: this.captureDiff(cwd, changedFiles),
-      testEvidence: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command, edgeCases: edge.status, ...this.testFailure(unit) } : null,
+      testEvidence: unit ? { result: unit.result, exitCode: unit.exit_code, command: unit.command, edgeCases: edge.status, ...this.testFailure(unit), ...(this.baselineFailed(mission, ticket.ref) ? { baselineFailed: true } : {}) } : null,
       followsRepair: (mission.repairs ?? []).some((item) => item.ticketRef === ticket.ref && item.status === "COMPLETED"),
       repairAttempt: [...(mission.repairs ?? [])].reverse().find((item) => item.ticketRef === ticket.ref && item.status === "COMPLETED")?.attempt,
     };
@@ -3261,10 +3292,133 @@ export class BmadControlPlane {
   }
 
   /**
+   * The test command for a worktree: the npm test script of the package holding the change (in a monorepo, the
+   * workspace packages that have one), else the project's own runner (Python, Go, Rust, make). `manifest` says
+   * whether the package holding the change has a package.json at all.
+   */
+  private testPlan(cwd: string, changed: string[]): { plan: TestCommand | null; manifest: boolean } {
+    const testDir = testPackageDir(cwd, changed);
+    const manifest = fs.existsSync(path.join(testDir, "package.json"));
+    let npm: TestCommand | null = null;
+    try {
+      npm = manifest ? npmTestPlan(cwd, changed, testDir) : null;
+    } catch {
+      npm = null;
+    }
+    return { plan: npm ?? detectTestCommand(cwd, changed), manifest };
+  }
+
+  private runTests(plan: TestCommand, worktree: string): { install: string | null; result: ReturnType<CommandRunner["run"]> } {
+    const install = plan.command === "npm" ? this.installDependencies(plan.dir, worktree) : null;
+    const result = this.runner.run(plan.command, plan.args, plan.dir, plan.command === "npm" ? 180000 : 300000);
+    return { install, result };
+  }
+
+  /**
+   * The repository's tests on the untouched worktree, before the coding agent starts. A suite that already fails
+   * (a broken config, a missing dev dependency) cannot pass the ticket's test gate, so the build prompt carries the
+   * failure and the fix of the test setup becomes part of the ticket. Null for a new project or a passing suite.
+   */
+  private baselineTests(mission: Mission, ticketRef: string, worktree: string): string | null {
+    const tracked = this.runner.run("git", ["ls-files"], worktree, 10000);
+    if (tracked.exitCode !== 0 || tracked.stdout.split("\n").filter((line) => line.trim()).length <= 3) return null;
+    const { plan } = this.testPlan(worktree, []);
+    if (!plan) return null;
+    const { install, result } = this.runTests(plan, worktree);
+    const output = `${result.stdout}\n${result.stderr}`.replace(/\u001b\[[0-9;]*m/g, "");
+    const file = path.join(this.root, ".bmad-next", "evidence", mission.id, `${ticketRef}-baseline.log`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const passed = result.exitCode === 0 && !result.timedOut && testCommandRanTests(result.stdout) && nonNodeRanTests(result.stdout);
+    fs.writeFileSync(file, redactSecrets(`BMAD-BASELINE: ${passed ? "pass" : "fail"} (${plan.label})\n${install ? `${install}\n` : ""}${output}`));
+    this.emit(mission, "BaselineTested", { ticketRef, command: plan.label, result: passed ? "pass" : "fail", log: file });
+    const noteFile = path.join(this.root, ".bmad-next", "evidence", mission.id, `${ticketRef}-baseline-note.md`);
+    fs.rmSync(noteFile, { force: true });
+    if (passed) return null;
+    const excerpt = redactSecrets(
+      output
+        .split("\n")
+        .filter((line) => line.trim() && !/^\s+at /.test(line) && !/npm (warn|error)|ExperimentalWarning|--trace-warnings/i.test(line))
+        .slice(0, 20)
+        .join("\n"),
+    ).slice(0, 2500);
+    const note = [
+      `Before any change, \`${plan.label}\` already fails in this repository${result.timedOut ? " (it timed out)" : ""}:`,
+      "```",
+      excerpt,
+      "```",
+      ...baselineDiagnosis(output, plan.dir, worktree),
+      "The ticket is verified by that same command, so it must pass when you finish. Fix the test setup with the smallest change that makes the existing tests run (keep every existing test, do not skip or delete any), then do the ticket and add its tests.",
+    ].join("\n");
+    fs.writeFileSync(noteFile, note);
+    return note;
+  }
+
+  /**
+   * What a retried build needs to know: the baseline failure recorded before the first attempt (the baseline does not
+   * rerun on a worktree that already has changes), and which files the earlier attempt left, since a model that stops
+   * after fixing the test setup has not done the ticket.
+   */
+  private retryContext(mission: Mission, ticketRef: string, earlier: string[]): string {
+    const noteFile = path.join(this.root, ".bmad-next", "evidence", mission.id, `${ticketRef}-baseline-note.md`);
+    const baseline = fs.existsSync(noteFile) ? fs.readFileSync(noteFile, "utf8") : "";
+    const resume = `An earlier attempt at this ticket stopped before finishing and left these changes in the worktree: ${earlier.join(", ")}. Keep what is correct and continue from there until the ticket itself is implemented and tested; fixing the test setup alone does not implement it.`;
+    return [baseline, resume].filter((part) => part).join("\n\n");
+  }
+
+  /**
+   * `npm run build` in each package the change touches that has one, after its tests pass, as the repository's CI
+   * would. Only for an existing repository. Tracked files a build rewrites (Next.js regenerates next-env.d.ts) are put
+   * back afterwards, so the build never changes the patch.
+   */
+  private runBuilds(worktree: string, changed: string[]): Array<{ label: string; ok: boolean; exitCode: number | null; timedOut: boolean; output: string }> {
+    const tracked = this.runner.run("git", ["ls-files"], worktree, 10000);
+    if (tracked.exitCode !== 0 || tracked.stdout.split("\n").filter((line) => line.trim()).length <= 3) return [];
+    const packages = buildPackages(worktree, changed);
+    if (packages.length === 0) return [];
+    const snapshot = this.dirtyContents(worktree);
+    const results = packages.map((pkg) => {
+      const result = this.runner.run("npm", ["run", "build"], path.join(worktree, pkg), 300000);
+      const output = `${result.stdout}\n${result.stderr}`.replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter((line) => line.trim()).slice(-60).join("\n");
+      return { label: pkg ? `npm run build (in ${pkg})` : "npm run build", ok: result.exitCode === 0 && !result.timedOut, exitCode: result.exitCode, timedOut: result.timedOut, output };
+    });
+    this.restoreDirty(worktree, snapshot);
+    return results;
+  }
+
+  /** Changed and untracked files with their contents (null for a deletion), so a build's side effects can be undone. */
+  private dirtyContents(worktree: string): Map<string, Buffer | null> {
+    const contents = new Map<string, Buffer | null>();
+    for (const file of this.listChanged(worktree)) {
+      const absolute = path.join(worktree, file.replace(/\/$/, ""));
+      contents.set(file, fs.existsSync(absolute) && fs.statSync(absolute).isFile() ? fs.readFileSync(absolute) : null);
+    }
+    return contents;
+  }
+
+  private restoreDirty(worktree: string, before: Map<string, Buffer | null>): void {
+    for (const file of this.listChanged(worktree)) {
+      const absolute = path.join(worktree, file.replace(/\/$/, ""));
+      if (!before.has(file)) {
+        // Clean before the build: a tracked file goes back to HEAD, a new untracked file is removed.
+        const restored = this.runner.run("git", ["checkout", "--", file], worktree, 10000);
+        if (restored.exitCode !== 0) fs.rmSync(absolute, { recursive: true, force: true });
+        continue;
+      }
+      const content = before.get(file);
+      if (content && (!fs.existsSync(absolute) || !fs.readFileSync(absolute).equals(content))) fs.writeFileSync(absolute, content);
+    }
+  }
+
+  private baselineFailed(mission: Mission, ticketRef: string): boolean {
+    const file = path.join(this.root, ".bmad-next", "evidence", mission.id, `${ticketRef}-baseline.log`);
+    return fs.existsSync(file) && fs.readFileSync(file, "utf8").startsWith("BMAD-BASELINE: fail");
+  }
+
+  /**
    * Declared dependencies are installed before the tests, with lifecycle scripts off, so a test that imports one is
    * judged on its assertions rather than on a missing package. Returns the install log, or null when nothing is declared.
    */
-  private installDependencies(dir: string): string | null {
+  private installDependencies(dir: string, worktree = dir): string | null {
     const manifest = path.join(dir, "package.json");
     let declared: string[] = [];
     try {
@@ -3273,9 +3427,22 @@ export class BmadControlPlane {
     } catch {
       return null;
     }
-    if (declared.length === 0 || declared.every((name) => fs.existsSync(path.join(dir, "node_modules", name, "package.json")))) return null;
-    const installed = this.runner.run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"], dir, 180000);
-    return [`$ npm install --ignore-scripts --no-audit --no-fund --no-package-lock (${declared.join(", ")})`, installed.stdout.trim(), installed.stderr.trim(), `install exit ${String(installed.exitCode)}`].filter((part) => part).join("\n");
+    const lockRoot = npmLockRoot(worktree, dir);
+    if (declared.length === 0 && !lockRoot) return null;
+    // Always a clean install: node_modules is gitignored, so an edit the agent made there would pass unreviewed.
+    fs.rmSync(path.join(dir, "node_modules"), { recursive: true, force: true });
+    const log = (label: string, result: { stdout: string; stderr: string; exitCode: number | null }) =>
+      [`$ ${label}`, result.stdout.trim(), result.stderr.trim(), `install exit ${String(result.exitCode)}`].filter((part) => part).join("\n");
+    const loose = ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock"];
+    if (!lockRoot) return log(`npm ${loose.join(" ")} (${declared.join(", ")})`, this.runner.run("npm", loose, dir, 180000));
+    // A lockfile (in a workspace monorepo, the root one) installs exactly what the repository pins, without rewriting
+    // it. When the change added a dependency the lockfile does not have, npm ci refuses and a lockless install follows.
+    const where = path.relative(worktree, lockRoot) || ".";
+    fs.rmSync(path.join(lockRoot, "node_modules"), { recursive: true, force: true });
+    const ci = this.runner.run("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], lockRoot, 300000);
+    const first = log(`npm ci --ignore-scripts --no-audit --no-fund (in ${where})`, ci);
+    if (ci.exitCode === 0 && !ci.timedOut) return first;
+    return [first, log(`npm ${loose.join(" ")} (in ${where})`, this.runner.run("npm", loose, lockRoot, 300000))].join("\n");
   }
 
   /** Why a unit run failed, from its own log: a reviewer or attacker told only "fail" guesses the cause. */
@@ -3377,7 +3544,7 @@ export class BmadControlPlane {
             ...components.map((file) => `- ${file} (the page the browser opens), with every script and stylesheet it loads`),
             ...layers.map((layer) => `- ${layer}/package.json whose test script names test files that exist`),
             ...layers.map((layer) => `- the test files in ${layer}, using node:test and node:assert`),
-            "Prefer Node built-ins and plain browser JavaScript. Test dependencies declared in package.json are installed before npm test; the browser serves the page as static files, so the page itself must not import packages.",
+            "Prefer Node built-ins and plain browser JavaScript. For storage in Node tests, pass the module a small in-memory object with getItem and setItem instead of using jsdom. Declared test dependencies are freshly installed before npm test (never edit node_modules); the browser serves the page as static files, so the page itself must not import packages.",
           ].join("\n")
         : "",
       artifacts.length > 0 ? `BMad artifacts for this mission (read them):\n${artifacts.join("\n")}` : "",
@@ -3399,6 +3566,8 @@ export class BmadControlPlane {
         // An unreadable package.json falls through to the other checks.
       }
     }
+    const workspaces = describeNpmTests(this.root);
+    if (workspaces) return workspaces;
     const existing = detectTestCommand(this.root, []);
     if (existing) {
       return `This repository already has a test setup. Add or update tests with its framework; the verifier runs \`${existing.label}\`, with the changed test files when there are some. Do not add a package.json. Once the fix and its tests are written, stop.`;

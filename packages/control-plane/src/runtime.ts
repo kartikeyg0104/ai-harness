@@ -192,12 +192,21 @@ export class OpenCodeAdapter implements AgentRuntime {
     }
     // Some models announce the edit ("Let's write package.json") and end the turn without the tool call. A run that
     // changed nothing continues the same session, so the model makes the edit it described; the transcript keeps both.
-    for (let nudge = 0; nudge < 2 && this.snapshot(context.cwd) === before; nudge += 1) {
+    // The provider can also reject one malformed tool call (HTTP 400) and end the run; the session itself is intact.
+    const rejectedCall = (stdout: string) => /"type"\s*:\s*"error"[^\n]*(BadRequestError|unexpected tokens|"code"\s*:\s*400)/.test(stdout.split("\n").filter((line) => line.trim()).at(-1) ?? "");
+    for (let nudge = 0; nudge < 2; nudge += 1) {
+      const idle = result.exitCode === 0 && this.snapshot(context.cwd) === before;
+      const rejected = result.exitCode !== 0 && rejectedCall(result.stdout);
+      if (!idle && !rejected) break;
       const session = /"sessionID"\s*:\s*"([^"]+)"/.exec(result.stdout)?.[1];
       if (!session || result.timedOut) break;
       const resume = ["run", "--pure", "--auto", "--format", "json", "--dir", context.cwd, "--session", session];
       if (model) resume.push("--model", model);
-      resume.push("You ended the turn without changing any file. Make the changes now with the write or edit tool, then stop. Describing a change is not making it.");
+      resume.push(
+        rejected
+          ? "Your last tool call was malformed and rejected. Continue the task from where you were with a valid tool call; do not start over."
+          : "You ended the turn without changing any file. Make the changes now with the write or edit tool, then stop. Describing a change is not making it.",
+      );
       const next = this.runner.run("opencode", resume, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: bound });
       result = { ...next, stdout: `${result.stdout}\n${next.stdout}`, stderr: [result.stderr, next.stderr].filter((part) => part.trim()).join("\n"), durationMs: (result.durationMs ?? 0) + (next.durationMs ?? 0) };
     }
