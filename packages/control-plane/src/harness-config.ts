@@ -29,7 +29,7 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   model: "openai/gpt-oss-20b",
   baseURL: "",
   temperature: 0,
-  timeoutMs: 300000,
+  timeoutMs: 600000,
   workspaceDir: "workspace",
   workflow: "issue",
 };

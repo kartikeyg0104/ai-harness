@@ -408,12 +408,16 @@ export class BmadControlPlane {
     // Answers numbered exactly 1..n, one per open question, map by position; any other id must match exactly.
     const positional = proposals.length === open.length && proposals.every((item, index) => String(item.id) === String(index + 1));
     const answered: string[] = [];
+    const rejected: string[] = [];
     for (const [index, question] of open.entries()) {
       const found = positional ? proposals[index] : proposals.find((item) => item.id === question.id);
       const text = typeof found?.answer === "string" ? found.answer.trim().slice(0, 600) : "";
       if (!text) continue;
       // Verification is not the model's to scope out; such an answer stays open for a retry or a person.
-      if (excludesVerification(text)) continue;
+      if (excludesVerification(text)) {
+        rejected.push(question.id);
+        continue;
+      }
       mission.forge.answered.push(question.id);
       mission.forge.locks.push({ kind: "assumption", key: question.id, text, at: this.now().toISOString(), source: "model" });
       this.emit(mission, "ForgeAnswered", { key: question.id, by: "model", command: runnerConfig.command });
@@ -422,12 +426,17 @@ export class BmadControlPlane {
     const left = open.filter((question) => !answered.includes(question.id)).map((question) => question.id);
     fs.writeFileSync(
       evidence,
-      JSON.stringify({ skill: "bmad-forge-idea", runner: runnerConfig.command, model: runnerConfig.model ?? null, status: result.status, exitCode: result.exitCode, durationMs: result.durationMs ?? null, answered, left, raw: redactSecrets(result.stdout).slice(-20000) }, null, 2),
+      JSON.stringify({ skill: "bmad-forge-idea", runner: runnerConfig.command, model: runnerConfig.model ?? null, status: result.status, exitCode: result.exitCode, durationMs: result.durationMs ?? null, answered, left, rejected, raw: redactSecrets(result.stdout).slice(-20000) }, null, 2),
     );
     this.emit(mission, left.length > 0 ? "SkillFailed" : "SkillCompleted", { skillId: "bmad-forge-idea", mode: "headless-answers", status: left.length > 0 ? `unanswered: ${left.join(", ")}` : "completed", answered });
     this.touch(mission);
     saveMission(this.root, mission);
-    if (left.length > 0) return { status: "blocked", reason: `The model runner left forge question(s) unanswered: ${left.join(", ")} (${result.status}).`, answered };
+    if (left.length > 0)
+      return {
+        status: "blocked",
+        reason: `The model runner left forge question(s) unanswered: ${left.join(", ")} (${result.status}).${rejected.length > 0 ? ` Rejected ${rejected.join(", ")}: the answer scoped out tests or verification, which are always required.` : ""}`,
+        answered,
+      };
     return { status: "answered", reason: `Model proposed answers for ${answered.join(", ")}. They are recorded as assumptions.`, answered };
   }
 
@@ -453,6 +462,8 @@ export class BmadControlPlane {
   acceptTicketTree(missionId: string, identity: string): Mission {
     const mission = this.must(missionId);
     if (!namedPerson(identity)) throw new Error("Accepting a ticket tree needs a person's name.");
+    // Accepting twice changes nothing; re-saving here could overwrite a build that is already running.
+    if (mission.ticketTreeAccepted && mission.tickets.length > 0) return mission;
     if (mission.tickets.length === 0) this.proposeTickets(missionId);
     const current = this.must(missionId);
     const rendered = renderTicketTree(current.epics, current.tickets);
@@ -700,8 +711,8 @@ export class BmadControlPlane {
     const after = this.runner.run("git", ["rev-parse", "HEAD"], worktreePath, 10000);
     const commit = after.exitCode === 0 && after.stdout.trim() !== before.stdout.trim() ? after.stdout.trim() : null;
     const changedFiles = this.listChanged(worktreePath);
-    const protocolFile = this.protocolFile(worktreePath, changedFiles, run.artifact);
     const runtimeFinished = run.status === "completed" && (run.exitCode === 0 || run.completionSignal === "terminal-event");
+    const protocolFile = this.protocolFile(worktreePath, changedFiles, run.artifact) ?? (runtimeFinished ? this.brownfieldChange(worktreePath, changedFiles) : null);
     const built = runtimeFinished && changedFiles.length > 0 && protocolFile !== null;
     let verification: TicketExecution["verification"] = "not-run";
     if (built) {
@@ -2629,6 +2640,18 @@ export class BmadControlPlane {
     return listed.stdout.split("\n").map((line) => line.slice(3).trim()).filter((line) => line.length > 0);
   }
 
+  /**
+   * In an existing repository the marker comment is optional: a run that stopped on its own and changed a tracked
+   * file stands as the build artifact. A new project (three tracked files or fewer) still needs the marker.
+   */
+  private brownfieldChange(worktree: string, changedFiles: string[]): string | null {
+    const tracked = this.runner.run("git", ["ls-files"], worktree, 10000);
+    const files = tracked.exitCode === 0 ? new Set(tracked.stdout.split("\n").map((line) => line.trim()).filter(Boolean)) : new Set<string>();
+    if (files.size <= 3) return null;
+    const changed = changedFiles.map((file) => file.replace(/\/$/, "")).find((file) => files.has(file) && fs.existsSync(path.join(worktree, file)));
+    return changed ? path.join(worktree, changed) : null;
+  }
+
   private protocolFile(worktree: string, changedFiles: string[], reported?: string): string | null {
     const candidates = [
       ...(reported ? [reported] : []),
@@ -3024,7 +3047,7 @@ export class BmadControlPlane {
       this.emit(mission, "TicketBlocked", { ticketRef: ticket.ref, reason: sealed.summary });
       this.emit(mission, "ReviewCompleted", this.reviewEventData(record));
     } else if (sealed.status === "PASS") {
-      if (this.protocolFile(cwd, changedFiles)) this.markPlan(mission, ticket, "built", null);
+      if (this.protocolFile(cwd, changedFiles) ?? this.brownfieldChange(cwd, changedFiles)) this.markPlan(mission, ticket, "built", null);
       this.moveIfLegal(mission, "verifying");
       this.moveIfLegal(mission, "reviewing");
       this.emit(mission, "ReviewCompleted", this.reviewEventData(record));
@@ -3312,6 +3335,7 @@ export class BmadControlPlane {
       .filter((artifact) => artifact.state === "complete" && artifact.kind !== "implementation" && artifact.path)
       .map((artifact) => `- ${artifact.skillId || artifact.kind}: ${path.isAbsolute(artifact.path) ? artifact.path : path.join(this.root, artifact.path)}`);
     const layers = mission.architecture.filter((item) => item.kind === "layer").map((item) => item.choice);
+    const components = mission.architecture.filter((item) => item.kind === "component" && /\.[a-z]+$/i.test(item.choice)).map((item) => item.choice);
     return [
       locks.length > 0 ? `Forge decisions:\n${locks.join("\n")}` : "",
       mission.architecture.length > 0
@@ -3319,11 +3343,40 @@ export class BmadControlPlane {
         : "",
       layers.length > 0
         ? `Put the implementation, its package.json, and its tests inside ${layers.join(", ")}. The package.json test script must run real tests of the acceptance criterion. They run with npm test in that directory under Node, without a browser, so keep the logic they exercise in a module Node can require. Each test must start from a clean state (fresh storage and data) and must not depend on another test's leftovers or order. Code the page loads must still run in a browser: no Node APIs such as fs, and no bare require; a module shared by the page and the tests exports with module.exports when module exists and otherwise attaches to window. A declared node technology is satisfied by JavaScript files; it does not make the page a Node program.`
-        : "Add a package.json whose test script runs real tests of the acceptance criterion.",
+        : this.testInstruction(),
+      components.length > 0 || layers.length > 0
+        ? [
+            "Do not stop until every one of these exists and npm test passes:",
+            ...components.map((file) => `- ${file} (the page the browser opens), with every script and stylesheet it loads`),
+            ...layers.map((layer) => `- ${layer}/package.json whose test script names test files that exist`),
+            ...layers.map((layer) => `- the test files in ${layer}, using node:test and node:assert`),
+            "Nothing is installed before tests or the browser run: use only Node built-ins and plain browser JavaScript, with no dependencies.",
+          ].join("\n")
+        : "",
       artifacts.length > 0 ? `BMad artifacts for this mission (read them):\n${artifacts.join("\n")}` : "",
     ]
       .filter((part) => part.length > 0)
       .join("\n\n");
+  }
+
+  /** How the ticket's tests must be written: the repository's own test setup when it has one, else a package.json. */
+  private testInstruction(): string {
+    const manifest = path.join(this.root, "package.json");
+    if (fs.existsSync(manifest)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(manifest, "utf8")) as { scripts?: { test?: unknown } };
+        if (typeof parsed.scripts?.test === "string" && parsed.scripts.test.trim()) {
+          return "Add or update tests that the repository's existing npm test script runs. Do not replace that script.";
+        }
+      } catch {
+        // An unreadable package.json falls through to the other checks.
+      }
+    }
+    const existing = detectTestCommand(this.root, []);
+    if (existing) {
+      return `This repository already has a test setup. Add or update tests with its framework; the verifier runs \`${existing.label}\`, with the changed test files when there are some. Do not add a package.json. Once the fix and its tests are written, stop.`;
+    }
+    return "Add a package.json whose test script runs real tests of the acceptance criterion.";
   }
 
   /** Paths git reports as changed or untracked in the main working tree, with their modification times. */

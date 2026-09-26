@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { ticketingCheck } from "../doctor";
-import { BmadControlPlane, testPackageDir } from "../plane";
+import { BmadControlPlane, excludesVerification, testPackageDir } from "../plane";
 import { BmadRunner } from "../skill-runner";
 import { PREVIEW_MARKER, previewDir, startPreview, withPreview } from "../preview";
 import { evaluateRelease, fileExists } from "../quality";
@@ -563,4 +563,28 @@ test("a repair gets the failing tests by name, assertion, and location, not only
     "✖ delete — AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 'keep' !== 'remove' (webapp/todo.test.js:40)",
   ]);
   assert.deepEqual(failingTestSummary("ℹ tests 3\nℹ pass 3"), []);
+});
+
+test("a proposed non-goal may limit features but never scope out tests or verification", () => {
+  assert.equal(excludesVerification("No server or backend, no authentication, no multi-user sync, no test coverage, no deployment pipeline."), true);
+  assert.equal(excludesVerification("Skip code review and security scans."), true);
+  assert.equal(excludesVerification("Without unit tests."), true);
+  assert.equal(excludesVerification("No authentication, backend database, multi-user collaboration, cloud sync, notifications, or advanced task management."), false);
+  assert.equal(excludesVerification("A person who wants a simple personal todo list and needs to quickly add, complete, delete, and preserve tasks."), false);
+  assert.equal(excludesVerification("The user can add a todo, and the tests check that it persists."), false);
+});
+
+test("accepting an accepted ticket tree is a no-op that records nothing and saves nothing", () => {
+  const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../../../.tmp"), "accept-twice-"));
+  const plane = new BmadControlPlane(root);
+  const id = plane.createMission("Build a simple todo web app with add, complete, delete, and local persistence.").id;
+  for (const answer of ["A person keeping a todo list.", "Todos survive a reload.", "No accounts."]) plane.answerForge(id, answer);
+  plane.answerForge(id, "harden");
+  plane.acceptTicketTree(id, "Ada Lovelace");
+  const file = path.join(root, ".bmad-next", "missions", id, "mission.json");
+  const before = fs.readFileSync(file, "utf8");
+  const events = plane.events(id).length;
+  plane.acceptTicketTree(id, "Grace Hopper");
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+  assert.equal(plane.events(id).length, events);
 });
