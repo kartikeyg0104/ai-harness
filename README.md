@@ -14,7 +14,7 @@ cd ai-harness
 export AI_API_KEY="<PROVIDED_API_KEY>"
 make setup   # npm ci (includes the pinned OpenCode runtime), build, optional Chromium
 make run     # launch the harness session
-make test    # 168 tests, no model calls
+make test    # full unit and integration suite, no model calls
 make clean   # remove build output and harness workspaces
 ```
 

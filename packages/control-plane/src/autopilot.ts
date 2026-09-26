@@ -209,10 +209,26 @@ async function verifyMission(
   say: (message: string) => void,
   stopped: () => boolean,
 ): Promise<{ status: AutopilotStop; reason: string } | null> {
-  const mission = plane.mission(missionId);
+  let mission = plane.mission(missionId);
+  // A quick fix declares no architecture up front; its declared components are the files the change touched.
+  if (mission.mode === "quick" && mission.architecture.length === 0) {
+    const touched = [...new Set((mission.executions ?? []).flatMap((item) => item.changedFiles ?? []))]
+      .map((file) => file.replace(/\/$/, ""))
+      .filter((file) => file && !file.startsWith(".bmad-next") && !file.startsWith("_bmad-output"))
+      .slice(0, 20);
+    touched.forEach((file, index) => plane.declareArchitecture(missionId, { id: `CMP-${index + 1}`, kind: "component", choice: file, alternatives: [] }));
+    if (touched.length > 0) say(`Declared the changed files as the architecture: ${touched.join(", ")}.`);
+    mission = plane.mission(missionId);
+  }
+  const kinds = new Set(missionEvidenceKinds(mission));
   for (const ticket of mission.tickets) {
     const requirement = mission.requirements.find((item) => ticket.covers.includes(item.id));
     if (!requirement) continue;
+    // Only the gates this mission's release requires run; a library fix needs no browser, scan, or NFR run.
+    const needsBrowser = kinds.has("browser") || requirementKinds(requirement, mission).includes("browser");
+    const needsSecurity = kinds.has("security") || requirementKinds(requirement, mission).includes("security");
+    const needsNfr = kinds.has("nfr") || requirementKinds(requirement, mission).includes("nfr");
+    if (!needsBrowser && !needsSecurity && !needsNfr) continue;
     let browser = null as Awaited<ReturnType<BmadControlPlane["runBrowser"]>> | null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       if (stopped()) return { status: "stopped", reason: "Stop requested." };

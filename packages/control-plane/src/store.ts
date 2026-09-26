@@ -91,8 +91,10 @@ export function acquireAutopilotLock(projectRoot: string, missionId: string): bo
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     try {
-      const at = Number(fs.readFileSync(file, "utf8").split("\n")[1]);
-      if (Number.isFinite(at) && Date.now() - at > AUTOPILOT_LOCK_STALE_MS) {
+      const [owner, stamp] = fs.readFileSync(file, "utf8").split("\n");
+      const at = Number(stamp);
+      // A lock whose process has exited (a reloaded window, a crash) is released at once, not after hours.
+      if ((Number.isFinite(at) && Date.now() - at > AUTOPILOT_LOCK_STALE_MS) || !processAlive(Number(owner))) {
         fs.rmSync(file, { force: true });
         fs.writeFileSync(file, `${process.pid}\n${Date.now()}\n`, { flag: "wx" });
         return true;
@@ -101,6 +103,16 @@ export function acquireAutopilotLock(projectRoot: string, missionId: string): bo
       return false;
     }
     return false;
+  }
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 

@@ -585,3 +585,46 @@ test("OpenCode retries once when its database is locked", () => {
   assert.equal(runs, 2);
   assert.equal(result.status, "completed");
 });
+
+test("an opencode run that only describes the edit continues its session until a file changes", () => {
+  const cwd = path.join(tempProject(), ".bmad-next", "worktrees", "m", "1.1");
+  fs.mkdirSync(cwd, { recursive: true });
+  const stop = (text: string) => `{"type":"text","sessionID":"ses_abc","part":{"text":"${text}"}}\n{"type":"step_finish","sessionID":"ses_abc","part":{"reason":"stop"}}`;
+  const calls: string[][] = [];
+  let status = "";
+  const adapter = new OpenCodeAdapter({
+    which: () => "/usr/bin/opencode",
+    run: (command, args) => {
+      if (command === "git") return { exitCode: 0, stdout: args[0] === "status" ? status : "", stderr: "", durationMs: 1, timedOut: false };
+      calls.push(args);
+      if (calls.length === 2) {
+        fs.writeFileSync(path.join(cwd, "index.html"), "<!-- BMAD-TICKET-STATUS: built -->");
+        status = "?? index.html\n";
+      }
+      return { exitCode: 0, stdout: stop(calls.length === 1 ? "Let's write index.html." : "Done."), stderr: "", durationMs: 1, timedOut: false };
+    },
+  });
+  const run = adapter.begin({ missionId: "m", ticketRef: "1.1", agent: "Developer", cwd, prompt: "build the page" });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1]?.slice(calls[1].indexOf("--session"), calls[1].indexOf("--session") + 2), ["--session", "ses_abc"]);
+  assert.match(calls[1]?.at(-1) ?? "", /Describing a change is not making it/);
+  assert.equal(run.status, "completed");
+  assert.deepEqual(run.changedFiles, ["index.html"]);
+  assert.match(run.transcript ?? "", /Let's write index\.html\.[\s\S]*Done\./);
+});
+
+test("an opencode run with no session id or no change is not retried forever", () => {
+  const cwd = path.join(tempProject(), ".bmad-next", "worktrees", "m", "1.1");
+  fs.mkdirSync(cwd, { recursive: true });
+  const calls: string[][] = [];
+  const adapter = new OpenCodeAdapter({
+    which: () => "/usr/bin/opencode",
+    run: (command, args) => {
+      if (command === "git") return { exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      calls.push(args);
+      return { exitCode: 0, stdout: '{"type":"step_finish","sessionID":"ses_x","part":{"reason":"stop"}}', stderr: "", durationMs: 1, timedOut: false };
+    },
+  });
+  adapter.begin({ missionId: "m", ticketRef: "1.1", agent: "Developer", cwd, prompt: "build" });
+  assert.equal(calls.length, 3, "one run and at most two continuations");
+});

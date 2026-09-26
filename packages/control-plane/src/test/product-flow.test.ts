@@ -588,3 +588,28 @@ test("accepting an accepted ticket tree is a no-op that records nothing and save
   assert.equal(fs.readFileSync(file, "utf8"), before);
   assert.equal(plane.events(id).length, events);
 });
+
+test("the build prompt lists the files that must exist and forbids dependencies nothing installs", () => {
+  const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../../../.tmp"), "deliverables-"));
+  const plane = new BmadControlPlane(root);
+  const id = plane.createMission("Build a simple todo web app with add, complete, delete, and local persistence.").id;
+  plane.declareArchitecture(id, { id: "LAYER-1", kind: "layer", choice: "webapp", alternatives: [] });
+  plane.declareArchitecture(id, { id: "CMP-1", kind: "component", choice: "webapp/index.html", alternatives: [] });
+  const context = (plane as unknown as { buildContext(mission: unknown): string }).buildContext(plane.mission(id));
+  assert.match(context, /Do not stop until every one of these exists and npm test passes:/);
+  assert.match(context, /- webapp\/index\.html \(the page the browser opens\)/);
+  assert.match(context, /- webapp\/package\.json whose test script names test files that exist/);
+  assert.match(context, /use only Node built-ins and plain browser JavaScript, with no dependencies/);
+});
+
+test("an autopilot lock left by a process that has exited does not block the next run", async () => {
+  const { acquireAutopilotLock } = await import("../store");
+  const root = fs.mkdtempSync(path.join(path.resolve(__dirname, "../../../../.tmp"), "lock-"));
+  const lock = path.join(root, ".bmad-next", "missions", "m1", "autopilot.lock");
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.writeFileSync(lock, `${process.pid}\n${Date.now()}\n`);
+  assert.equal(acquireAutopilotLock(root, "m1"), false, "a live owner keeps its lock");
+  fs.writeFileSync(lock, `999999\n${Date.now()}\n`);
+  assert.equal(acquireAutopilotLock(root, "m1"), true, "a dead owner's lock is taken over");
+  assert.equal(fs.readFileSync(lock, "utf8").split("\n")[0], String(process.pid));
+});

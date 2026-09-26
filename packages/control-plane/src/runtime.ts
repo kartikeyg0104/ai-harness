@@ -178,16 +178,28 @@ export class OpenCodeAdapter implements AgentRuntime {
     const existingProject = tracked.exitCode === 0 && tracked.stdout.split("\n").filter((line) => line.trim()).length > 3;
     if (existingProject) {
       args.push(
-        `${context.prompt}\n\nWork only in ${context.cwd}. This is an existing repository. Read the code the ticket touches first, then make the smallest change that resolves it and follow the project's conventions. Add or update tests with the project's existing test framework (for example pytest for Python or the package's own npm test script). Do not add a package.json or change the build system unless the ticket asks for it. Put this exact marker as a comment on its own line in one changed source file, using that language's comment syntax (for example # BMAD-TICKET-STATUS: built in Python, // BMAD-TICKET-STATUS: built in JavaScript); the harness removes it from the final patch. Do not keep exploring after the change and its tests exist. A chat reply is not completion.`,
+        `${context.prompt}\n\nWork only in ${context.cwd}. This is an existing repository. Read the code the ticket touches first, then make the smallest change that resolves it and follow the project's conventions. Add or update tests with the project's existing test framework (for example pytest for Python or the package's own npm test script). Do not add a package.json or change the build system unless the ticket asks for it. Edit files with the edit or write tool so they contain plain source code: never write diff syntax such as leading + or - characters or @@ hunk headers into a file. After editing, run the tests once to check the change. Do not keep exploring after the change and its tests exist. A chat reply is not completion.`,
       );
     } else args.push(
       `${context.prompt}\n\nWork only in ${context.cwd}. Write the implementation files and, when the ticket asks for tests, the tests and the package.json that runs them; then stop. If this ticket is a web application, ship a page the browser can open: index.html plus the JavaScript it needs for add, complete, delete, and localStorage persistence. A Node-only module without index.html is not a web app. Put this exact marker in one implementation source file where the program still parses (a // comment in JavaScript, or <!-- BMAD-TICKET-STATUS: built --> in HTML):\n// BMAD-TICKET-STATUS: built\nIf you add a test, use node:test and node:assert/strict and cover add, complete, delete, plus persistence or reload. Do not import expect, beforeAll, or afterAll. Do not keep exploring after the files exist. A chat reply is not completion.`,
     );
     // An existing repository needs more steps to read the code before the change.
     const bound = openCodeStepBound(existingProject ? 40 : 20);
+    const before = this.snapshot(context.cwd);
     let result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: bound });
     if (result.exitCode !== 0 && /database is locked/i.test(result.stderr)) {
       result = this.runner.run("opencode", args, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: bound });
+    }
+    // Some models announce the edit ("Let's write package.json") and end the turn without the tool call. A run that
+    // changed nothing continues the same session, so the model makes the edit it described; the transcript keeps both.
+    for (let nudge = 0; nudge < 2 && this.snapshot(context.cwd) === before; nudge += 1) {
+      const session = /"sessionID"\s*:\s*"([^"]+)"/.exec(result.stdout)?.[1];
+      if (!session || result.timedOut) break;
+      const resume = ["run", "--pure", "--auto", "--format", "json", "--dir", context.cwd, "--session", session];
+      if (model) resume.push("--model", model);
+      resume.push("You ended the turn without changing any file. Make the changes now with the write or edit tool, then stop. Describing a change is not making it.");
+      const next = this.runner.run("opencode", resume, context.cwd, timeout, { OPENCODE_CONFIG_CONTENT: bound });
+      result = { ...next, stdout: `${result.stdout}\n${next.stdout}`, stderr: [result.stderr, next.stderr].filter((part) => part.trim()).join("\n"), durationMs: (result.durationMs ?? 0) + (next.durationMs ?? 0) };
     }
     const classified = classifyOpenCodeRun({ exitCode: result.exitCode, stdout: result.stdout, timedOut: result.timedOut });
     const listed = this.runner.run("git", ["status", "--short", "--untracked-files=all"], context.cwd, 10000);
@@ -208,6 +220,23 @@ export class OpenCodeAdapter implements AgentRuntime {
       completionSignal: classified.completionSignal,
       transcript: result.stdout.slice(-2_000_000),
     };
+  }
+
+  /** Changed paths with size and mtime: equal before and after means the run edited nothing. */
+  private snapshot(cwd: string): string {
+    const listed = this.runner.run("git", ["status", "--short", "--untracked-files=all"], cwd, 10000);
+    if (listed.exitCode !== 0) return "";
+    return listed.stdout
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter((line) => line.length > 0)
+      .map((file) => {
+        const target = path.join(cwd, file);
+        const stat = fs.existsSync(target) ? fs.statSync(target) : null;
+        return `${file}:${stat ? `${stat.size}:${stat.mtimeMs}` : "gone"}`;
+      })
+      .sort()
+      .join("|");
   }
 
   resume(runId: string): Promise<AgentRun> {
