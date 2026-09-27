@@ -69,7 +69,7 @@ setup: check-node check-git
 
 run: check-node
 	@test -f packages/cli/dist/main.js || { echo "Not built. Run 'make setup' first."; exit 1; }
-	@if [ -z "$$AI_API_KEY" ]; then echo "Warning: AI_API_KEY is not set. Model calls will fail unless OpenCode has its own login."; fi
+	@if [ -z "$$AI_API_KEY" ] && ! grep -qE '^AI_API_KEY=.+' .env 2>/dev/null; then echo "Warning: AI_API_KEY is not set in the environment or .env. Model calls will fail unless OpenCode has its own login."; fi
 	@$(CLI) harness
 
 test: check-node

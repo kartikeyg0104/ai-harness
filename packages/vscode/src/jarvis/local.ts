@@ -12,6 +12,8 @@ import { VoiceError, type AudioClip, type Availability, type InterpretedCommand,
 export interface LocalVoiceConfig {
   url: string;
   model: string;
+  /** Sent as a bearer token when the endpoint needs one (a hosted provider); local Ollama needs none. */
+  apiKey: string;
   whisperServer: string;
   whisperModel: string;
   timeoutMs: number;
@@ -20,8 +22,9 @@ export interface LocalVoiceConfig {
 export function localVoiceConfig(env: NodeJS.ProcessEnv = process.env): LocalVoiceConfig {
   const cache = path.join(os.homedir(), ".cache", "bmad-next", "whisper");
   return {
-    url: (env.BMAD_JARVIS_URL ?? "").trim() || "http://127.0.0.1:11435/v1",
+    url: (env.BMAD_JARVIS_URL ?? "").trim() || (env.AI_BASE_URL ?? "").trim() || "http://127.0.0.1:11434/v1",
     model: (env.BMAD_JARVIS_MODEL ?? "").trim() || (env.BMAD_MODEL ?? "").replace(/^ollama\//, "").trim() || "qwen3-coder:30b",
+    apiKey: (env.BMAD_JARVIS_API_KEY ?? "").trim() || (env.AI_API_KEY ?? "").trim(),
     whisperServer: (env.BMAD_WHISPER_SERVER ?? "").trim() || "whisper-server",
     whisperModel: (env.BMAD_WHISPER_MODEL ?? "").trim() || path.join(cache, "ggml-large-v3-turbo-q5_0.bin"),
     timeoutMs: Number(env.BMAD_JARVIS_TIMEOUT) > 0 ? Number(env.BMAD_JARVIS_TIMEOUT) : 90000,
@@ -202,7 +205,7 @@ export class LocalIntentProvider implements VoiceIntentProvider {
     try {
       response = await this.fetchImpl(`${this.config.url.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}) },
         body: JSON.stringify({ model: this.config.model, messages, temperature: 0.2, stream: false, ...(json ? { response_format: { type: "json_object" } } : {}) }),
         signal: AbortSignal.timeout(this.config.timeoutMs),
       });

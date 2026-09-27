@@ -119,3 +119,20 @@ export function applyHarnessEnv(root: string, config: HarnessConfig, env: NodeJS
   for (const [key, value] of Object.entries(values)) env[key] = value;
   return Object.keys(values);
 }
+
+/** Public OpenAI-compatible endpoints for providers that OpenCode knows by name. */
+const PROVIDER_ENDPOINTS: Record<string, string> = {
+  nvidia: "https://integrate.api.nvidia.com/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  openai: "https://api.openai.com/v1",
+  groq: "https://api.groq.com/openai/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  mistral: "https://api.mistral.ai/v1",
+  together: "https://api.together.xyz/v1",
+};
+
+/** Where Jarvis sends chat requests for the harness model: the configured base URL, or the provider's public API. */
+export function jarvisEndpoint(config: HarnessConfig): { url: string; model: string } | null {
+  const url = config.baseURL || PROVIDER_ENDPOINTS[config.provider] || "";
+  return url ? { url, model: config.model } : null;
+}

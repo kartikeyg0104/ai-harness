@@ -23,7 +23,7 @@ export { decideCommand, authorizeAgent, globMatch } from "./policy";
 export { doctorBrief, doctorLabel, runDoctor } from "./doctor";
 export { assertDemoPath, demoDirectory, formatDemoReport, formatMissionStatus, resetDemo } from "./demo";
 export { loadProjectEnv } from "./env";
-export { DEFAULT_HARNESS_CONFIG, HARNESS_CONFIG_FILE, HARNESS_STATE_DIR, OPENAI_COMPATIBLE, applyHarnessEnv, harnessModelId, harnessOpenCodeConfig, loadHarnessConfig } from "./harness-config";
+export { DEFAULT_HARNESS_CONFIG, HARNESS_CONFIG_FILE, HARNESS_STATE_DIR, OPENAI_COMPATIBLE, applyHarnessEnv, harnessModelId, harnessOpenCodeConfig, jarvisEndpoint, loadHarnessConfig } from "./harness-config";
 export type { HarnessConfig } from "./harness-config";
 export { assertPassEvidence, currentResultFor, detectEdgeCaseTests, evaluateRelease, coverage, evidenceIsStale, partitionEvidence, proofFor, releaseApprovalRequired, releaseMatrix, requirementCoverage } from "./quality";
 export { CommandSecurityScanner, combineSecurityStatus, isBlockingFinding, parseSemgrep, parseTrivy, parseTrufflehog, redactSecurityOutput } from "./security";

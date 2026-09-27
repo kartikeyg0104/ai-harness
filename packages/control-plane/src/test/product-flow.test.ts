@@ -531,6 +531,13 @@ test("forge answers numbered 1..n map to the open questions in order; partial nu
   assert.ok(prompt);
 });
 
+test("Jarvis talks to the harness model: the configured base URL, or the provider's public API", async () => {
+  const { jarvisEndpoint, DEFAULT_HARNESS_CONFIG } = await import("../harness-config");
+  assert.deepEqual(jarvisEndpoint({ ...DEFAULT_HARNESS_CONFIG }), { url: "https://integrate.api.nvidia.com/v1", model: "openai/gpt-oss-20b" });
+  assert.deepEqual(jarvisEndpoint({ ...DEFAULT_HARNESS_CONFIG, provider: "openai-compatible", baseURL: "http://127.0.0.1:11434/v1", model: "qwen3" }), { url: "http://127.0.0.1:11434/v1", model: "qwen3" });
+  assert.equal(jarvisEndpoint({ ...DEFAULT_HARNESS_CONFIG, provider: "unknown-provider" }), null);
+});
+
 test("a mission from the history becomes the active mission; an unknown or malformed id does not", () => {
   const plane = new BmadControlPlane(tempProject());
   const first = plane.createMission("First idea: a todo app");

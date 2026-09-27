@@ -373,7 +373,7 @@ async function runTask(session: Session, raw: string): Promise<AutopilotResult |
 }
 
 function banner(session: Session): void {
-  const key = (process.env.AI_API_KEY ?? "").trim() ? "set (value hidden)" : "NOT SET - export AI_API_KEY before make run";
+  const key = (process.env.AI_API_KEY ?? "").trim() ? "set (value hidden)" : "NOT SET - add AI_API_KEY to .env or export it before make run";
   const opencode = opencodeVersion();
   say("AI Harness (BMAD Next) - evaluation mode");
   say(`Model:      ${harnessModelId(session.config)}${session.config.baseURL ? ` via ${session.config.baseURL}` : ""}`);

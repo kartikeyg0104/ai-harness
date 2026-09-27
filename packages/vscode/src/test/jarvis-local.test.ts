@@ -39,6 +39,22 @@ test("the local model's JSON answer carries the reply, the language, and an inte
   assert.equal(provider.availability().ok, false);
 });
 
+test("a hosted endpoint gets its API key as a bearer token; a local one gets none", async () => {
+  const headers: Array<Record<string, string>> = [];
+  const fake = (async (_url: string, init: { headers: Record<string, string> }) => {
+    headers.push(init.headers);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ language: "en", reply: "ok", intent: { name: "status" } }) } }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const hosted = localVoiceConfig({ AI_BASE_URL: "https://api.example.test/v1", AI_API_KEY: "sk-test-123" });
+  assert.equal(hosted.url, "https://api.example.test/v1");
+  await new LocalIntentProvider(hosted, new WhisperService(hosted, () => false), fake).interpretText("status", {});
+  const local = localVoiceConfig({});
+  assert.equal(local.url, "http://127.0.0.1:11434/v1");
+  await new LocalIntentProvider(local, new WhisperService(local, () => false), fake).interpretText("status", {});
+  assert.equal(headers[0]?.authorization, "Bearer sk-test-123");
+  assert.equal(headers[1]?.authorization, undefined);
+});
+
 test("an unreachable or garbled model is reported, not guessed around", async () => {
   const config = { ...localVoiceConfig({}), url: "http://model.test/v1", model: "m" };
   const down = (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch;

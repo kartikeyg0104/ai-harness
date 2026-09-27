@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { BmadControlPlane, evaluateRelease, loadProjectEnv, parseIntent } from "@bmad-next/control-plane";
+import { BmadControlPlane, applyHarnessEnv, evaluateRelease, jarvisEndpoint, loadHarnessConfig, loadProjectEnv, parseIntent } from "@bmad-next/control-plane";
 import type { Mission } from "@bmad-next/control-plane";
 import { autopilotRunning, registerWorkflowCommands } from "./workflow";
 import { FfmpegMicrophoneInput, GeminiIntentProvider, SystemSpeechOutput, TextCommandIntentProvider } from "./jarvis/providers";
@@ -23,6 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!root) return;
   loadProjectEnv(root);
+  const oneKey = useApiKeySetup(root);
   plane = new BmadControlPlane(root);
   globalState = context.globalState;
   const diagnostics = vscode.languages.createDiagnosticCollection("bmad-next");
@@ -108,8 +109,30 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
   output.appendLine(`BMAD Next activated for ${root}. Runtime ${process.env.BMAD_RUNTIME || "unset"}, model ${process.env.BMAD_MODEL || "unset"}.`);
+  if (oneKey) output.appendLine(oneKey);
   registerJarvis(context, root, output);
   refresh(diagnostics);
+}
+
+/**
+ * One key is enough: with AI_API_KEY in .env and no runner configured by hand, the builder, reviewer, attacker, and
+ * Jarvis all use the harness model (harness.config.json, or AI_PROVIDER / AI_MODEL / AI_BASE_URL). Returns a line for
+ * the log, or null when the project configures its runners itself.
+ */
+function useApiKeySetup(root: string): string | null {
+  if (!(process.env.AI_API_KEY ?? "").trim() || (process.env.BMAD_RUNNER ?? "").trim()) return null;
+  try {
+    const config = loadHarnessConfig(root);
+    applyHarnessEnv(root, config);
+    const jarvisModel = jarvisEndpoint(config);
+    if (jarvisModel && !(process.env.BMAD_JARVIS_URL ?? "").trim()) {
+      process.env.BMAD_JARVIS_URL = jarvisModel.url;
+      process.env.BMAD_JARVIS_MODEL = jarvisModel.model;
+    }
+    return `Using AI_API_KEY with ${config.provider}/${config.model} for every agent and Jarvis.`;
+  } catch (error) {
+    return `AI_API_KEY is set, but the model setup failed: ${message(error)}`;
+  }
 }
 
 export function deactivate(): void {
