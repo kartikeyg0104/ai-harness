@@ -154,6 +154,12 @@ test("commands are interpreted then validated; nothing unknown or malformed reac
   assert.equal(validateIntent(null).ok, false);
   assert.equal(validateIntent("status").ok, false);
   assert.deepEqual(validateIntent({ name: "STATUS" }), { ok: true, intent: { name: "status" } });
+  // A person can accept tickets and approve a release by voice; an approval never goes through without a reason.
+  assert.equal(parseCommand("Accept the tickets").name, "accept_tickets");
+  assert.deepEqual(parseCommand("Approve the release because the app works in the browser"), { name: "approve_release", reason: "the app works in the browser" });
+  assert.deepEqual(validateIntent({ name: "approve_release", reason: "tests and review passed" }), { ok: true, intent: { name: "approve_release", reason: "tests and review passed" } });
+  assert.equal(validateIntent({ name: "approve_release" }).ok, false);
+  assert.equal(validateIntent(parseCommand("Approve the release")).ok, false);
 });
 
 test("answers report actual state: no agents means none, and blockers are the real failing gates", () => {

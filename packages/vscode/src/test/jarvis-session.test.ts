@@ -84,6 +84,8 @@ function setup(options: { output?: RecordingOutput; intent?: VoiceIntentProvider
     showEvidence: () => {
       calls.evidence += 1;
     },
+    acceptTickets: () => "Ticket tree accepted.",
+    approveRelease: (reason) => `Release approved: ${reason}`,
   };
   const output = options.output ?? new RecordingOutput();
   const snapshots: JarvisSnapshot[] = [];
@@ -275,4 +277,96 @@ test("a denied microphone is reported with a recovery step, and no audio is sent
   microphone.start();
   await assert.rejects(microphone.stop(), (error: VoiceError) => error.kind === "permission" && /System Settings > Privacy & Security > Microphone/.test(error.message));
   assert.equal(new FfmpegMicrophoneInput(":0", () => child as never, () => false, "darwin").availability().ok, false);
+});
+
+/** A model that answers in Hindi, and a recogniser and microphone that replay what the test says was heard. */
+class HindiModel implements VoiceIntentProvider {
+  readonly id = "local";
+  asked: string[] = [];
+  availability(): Availability {
+    return { ok: true, reason: "test model" };
+  }
+  textReady(): boolean {
+    return true;
+  }
+  interpretText(text: string, _context: Record<string, unknown>, language?: string) {
+    this.asked.push(text);
+    const create = /बनाओ|build/i.test(text);
+    return Promise.resolve({
+      transcript: text,
+      provider: this.id,
+      language: language ?? "hi",
+      intent: create ? { name: "create_mission", idea: TODO } : { name: "status" },
+      reply: create ? "मिशन बना रहा हूँ।" : "अभी कुछ नहीं चल रहा है।",
+    });
+  }
+  interpretAudio(): Promise<never> {
+    return Promise.reject(new Error("unused"));
+  }
+  translate(text: string): Promise<string> {
+    return Promise.resolve(`[hi] ${text}`);
+  }
+}
+
+test("while Jarvis is off, only an utterance that starts with the wake phrase wakes it; hands-free needs no phrase", async () => {
+  const root = tempProject();
+  const plane = new BmadControlPlane(root);
+  let started = 0;
+  const host: JarvisHost = {
+    root,
+    plane: () => plane,
+    autopilotRunning: () => false,
+    startAutopilot: () => {
+      started += 1;
+    },
+    stopAutopilot: () => undefined,
+    showEvidence: () => undefined,
+    acceptTickets: () => "Ticket tree accepted.",
+    approveRelease: (reason) => `Release approved: ${reason}`,
+  };
+  const spoken: Array<{ text: string; language?: string }> = [];
+  const output: VoiceOutputProvider = { id: "rec", availability: () => ({ ok: true, reason: "rec" }), speak: (text, language) => (spoken.push({ text, language }), Promise.resolve()), stop: () => undefined };
+  const heard: Array<{ text: string; language: string }> = [];
+  const transcriber = { availability: () => ({ ok: true, reason: "test" }), transcribe: () => Promise.resolve(heard.shift() ?? { text: "", language: "en" }) };
+  const mic = { running: false, muted: false, start() { this.running = true; }, stop() { this.running = false; }, mute(m: boolean) { this.muted = m; } };
+  const model = new HindiModel();
+  const session = new JarvisSession(
+    host,
+    { input: null, intent: model, fallback: new TextCommandIntentProvider(), output, continuous: mic as never, transcriber },
+    { narration: "off", voiceOutput: "system", autoListen: "pushToTalk" },
+    () => undefined,
+  );
+  const clip = { mimeType: "audio/wav", data: Buffer.alloc(64), durationMs: 900 };
+  const utter = (session as unknown as { onUtterance(c: AudioClip): Promise<void> }).onUtterance.bind(session);
+
+  session.setListening({ wakeWord: true });
+  assert.equal(mic.running, true);
+  assert.equal(session.machine.state, "JARVIS_OFF");
+
+  heard.push({ text: "the weather is nice today", language: "en" });
+  await utter(clip);
+  assert.equal(session.machine.state, "JARVIS_OFF");
+  assert.equal(model.asked.length, 0);
+
+  heard.push({ text: "जार्विस, मेरे लिए एक टूडू ऐप बनाओ", language: "hi" });
+  await utter(clip);
+  await session.flush();
+  assert.notEqual(session.machine.state, "JARVIS_OFF");
+  assert.deepEqual(model.asked, ["मेरे लिए एक टूडू ऐप बनाओ"]);
+  assert.equal(plane.listMissions().length, 1);
+  assert.equal(started, 1);
+  // The action's own result is what Jarvis says, put into Hindi, in a Hindi voice.
+  assert.ok(spoken.some((line) => line.language === "hi" && line.text.startsWith("[hi] Starting mission")));
+  assert.equal(session.snapshot().language, "hi");
+
+  // Hands-free: no wake phrase needed, and questions are answered with the model's grounded reply.
+  session.setListening({ handsFree: true });
+  heard.push({ text: "अभी क्या चल रहा है?", language: "hi" });
+  await utter(clip);
+  await session.flush();
+  assert.equal(model.asked.at(-1), "अभी क्या चल रहा है?");
+  assert.ok(spoken.some((line) => line.text === "अभी कुछ नहीं चल रहा है।"));
+
+  session.dispose();
+  assert.equal(mic.running, false);
 });

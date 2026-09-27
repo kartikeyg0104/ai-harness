@@ -139,6 +139,11 @@ export function loadMission(projectRoot: string, missionId: string): Mission {
   return migrateMission(readJson<Mission>(file));
 }
 
+/** Makes an existing mission the one every command and view works on. */
+export function setActiveMission(projectRoot: string, missionId: string): void {
+  fs.writeFileSync(path.join(ensureHome(projectRoot).home, "active-mission"), missionId);
+}
+
 export function activeMissionId(projectRoot: string): string | null {
   const file = path.join(ensureHome(projectRoot).home, "active-mission");
   if (!fs.existsSync(file)) return null;

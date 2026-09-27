@@ -29,19 +29,12 @@
     },
     "views": {
       "bmad-next": [
-        { "type": "webview", "id": "bmad-next.jarvis", "name": "Jarvis", "initialSize": 1 },
-        { "type": "webview", "id": "bmad-next.missionControl", "name": "Mission", "initialSize": 4 },
-        { "id": "bmad-next.requirements", "name": "Requirements", "visibility": "collapsed" },
-        { "id": "bmad-next.tickets", "name": "Stories", "visibility": "collapsed" },
-        { "id": "bmad-next.evidence", "name": "Evidence", "visibility": "collapsed" },
-        { "id": "bmad-next.findings", "name": "Findings", "visibility": "collapsed" },
-        { "id": "bmad-next.agents", "name": "Agents", "visibility": "collapsed" },
-        { "id": "bmad-next.release", "name": "Release", "visibility": "collapsed" },
-        { "id": "bmad-next.brain", "name": "Project Brain", "visibility": "collapsed" }
+        { "type": "webview", "id": "bmad-next.home", "name": "Mission" }
       ]
     },
     "commands": [
       { "command": "bmad-next.mission", "title": "BMAD: New Mission", "icon": "$(add)" },
+      { "command": "bmad-next.history", "title": "BMAD: Mission History", "icon": "$(history)" },
       { "command": "bmad-next.forgeAnswer", "title": "BMAD: Answer Forge Question" },
       { "command": "bmad-next.harden", "title": "BMAD: Harden Forge" },
       { "command": "bmad-next.acceptTickets", "title": "BMAD: Accept Ticket Tree" },
@@ -70,14 +63,17 @@
       { "command": "bmad-next.jarvis.pause", "title": "BMAD Next: Pause Jarvis" },
       { "command": "bmad-next.jarvis.resume", "title": "BMAD Next: Resume Jarvis" },
       { "command": "bmad-next.jarvis.stopSpeaking", "title": "BMAD Next: Stop Jarvis Speaking" },
+      { "command": "bmad-next.jarvis.handsFree", "title": "BMAD Next: Toggle Hands-free Conversation" },
+      { "command": "bmad-next.jarvis.wakeWord", "title": "BMAD Next: Toggle \"Hey Jarvis\" Listening" },
       { "command": "bmad-next.jarvis.toggle", "title": "BMAD Next: Toggle Jarvis Mode" },
       { "command": "bmad-next.approveRelease", "title": "BMAD: Approve Release…" },
       { "command": "bmad-next.rejectRelease", "title": "BMAD: Reject Release…" }
     ],
     "menus": {
       "view/title": [
-        { "command": "bmad-next.mission", "when": "view == bmad-next.missionControl", "group": "navigation" },
-        { "command": "bmad-next.autopilot", "when": "view == bmad-next.missionControl", "group": "navigation" }
+        { "command": "bmad-next.history", "when": "view == bmad-next.home", "group": "navigation@1" },
+        { "command": "bmad-next.mission", "when": "view == bmad-next.home", "group": "navigation@2" },
+        { "command": "bmad-next.autopilot", "when": "view == bmad-next.home", "group": "navigation@3" }
       ]
     },
     "keybindings": [
@@ -88,9 +84,9 @@
       "properties": {
         "bmadNext.jarvis.voiceInput": {
           "type": "string",
-          "enum": ["gemini", "off"],
-          "default": "gemini",
-          "description": "Voice intent provider for Jarvis. Gemini reads GEMINI_API_KEY and GEMINI_MODEL from the extension host environment; the key never reaches a webview. Typed commands always work."
+          "enum": ["local", "gemini", "off"],
+          "default": "local",
+          "description": "How Jarvis hears and understands. local: whisper.cpp on this machine hears and detects the language, and the mission's Ollama model (BMAD_JARVIS_URL, BMAD_JARVIS_MODEL) answers in the language you spoke. gemini: Gemini with GEMINI_API_KEY. off: typed commands only."
         },
         "bmadNext.jarvis.voiceOutput": {
           "type": "string",
@@ -108,7 +104,7 @@
           "type": "string",
           "enum": ["off", "pushToTalk"],
           "default": "pushToTalk",
-          "description": "How Jarvis listens. Push-to-talk records only while the talk button is held. Continuous session listening is not offered: it would keep the microphone open between requests."
+          "description": "Push-to-talk records only while the talk button (or the Jarvis core) is held. Hands-free conversation and \"Hey Jarvis\" are separate switches in the Jarvis core; while either is on, the microphone stays open and the status bar says so."
         },
         "bmadNext.jarvis.microphoneDevice": {
           "type": "string",

@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BMAD Next: the BMAD Method on autopilot, with proof</title>
+<meta name="description" content="BMAD Next runs the BMAD Method as an autopilot inside VS Code. Tell Jarvis what to build, in any language. It plans, builds, tests, reviews, and attacks the work, and nothing ships until every gate has evidence and you approve it." />
+<meta name="theme-color" content="#060a0f" />
+<link rel="icon" href="assets/mark.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav-bar" id="nav"><div class="nav">
+  <a class="brand" href="#top" aria-label="BMAD Next home">
+    <img src="assets/mark.svg" alt="" width="26" height="26" />
+    <span>BMAD Next</span>
+  </a>
+  <nav aria-label="Sections">
+    <a href="#bmad">BMAD</a>
+    <a href="#how">How it works</a>
+    <a href="#jarvis">Jarvis</a>
+    <a href="#proof">Proof</a>
+    <a href="#start">Get started</a>
+  </nav>
+  <a class="btn btn-gold btn-sm" href="#start">Get the extension</a>
+</div></header>
+
+<main id="main">
+
+<!-- ============================================================ hero -->
+<section class="hero" id="top">
+  <div class="hero-copy">
+    <p class="kicker"><span class="live-dot" aria-hidden="true"></span>The BMAD Method on autopilot, inside VS Code</p>
+    <h1>Say what to build.<br />Jarvis ships it with proof.</h1>
+    <p class="lede">BMAD Next runs the BMAD Method's agents and workflows for you, turning one sentence into a planned, built, tested, reviewed, and attacked project. Talk to Jarvis in English, Hindi, or the language you think in. Nothing ships until every gate has evidence and you say yes.</p>
+    <div class="cta-row">
+      <a class="btn btn-gold" href="#start">Get started</a>
+      <a class="btn btn-ghost" href="#how">See how it works</a>
+    </div>
+    <dl class="facts" aria-label="What a mission looks like">
+      <div><dt>14</dt><dd>steps from idea to release</dd></div>
+      <div><dt>6</dt><dd>release checks, all evidence-backed</dd></div>
+      <div><dt>0</dt><dd>API keys needed</dd></div>
+    </dl>
+  </div>
+
+  <div class="hero-stage" aria-label="Jarvis, the voice of BMAD Next">
+    <div class="hud">
+      <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+      <canvas class="core" id="hero-core" width="440" height="440" role="img" aria-label="Animated Jarvis core"></canvas>
+      <div class="hud-read">
+        <span class="hud-name"><i></i>Jarvis</span>
+        <strong id="hud-state">Listening</strong>
+      </div>
+    </div>
+    <div class="convo" id="convo" aria-live="polite">
+      <div class="lang-switch" role="tablist" aria-label="Conversation language">
+        <button role="tab" aria-selected="true" data-lang="en">English</button>
+        <button role="tab" aria-selected="false" data-lang="hi">हिन्दी</button>
+      </div>
+      <ol class="lines" id="lines"></ol>
+    </div>
+  </div>
+</section>
+
+
+<!-- ============================================================ BMAD -->
+<section class="bmad" id="bmad" aria-labelledby="bmad-title">
+  <div class="section-intro">
+    <h2 id="bmad-title">Built on the BMAD Method</h2>
+    <p>BMAD is an open-source method for building software with AI agents: named expert roles and step-by-step workflows that carry an idea from analysis to shipped code. BMAD Next is its control plane. It runs BMAD's own skills, pinned to a known version, and adds what a method alone cannot: evidence at every gate.</p>
+  </div>
+
+  <ol class="verbs" aria-label="The BMAD Next loop">
+    <li><b>Think it</b><span>Brainstorm, Forge Idea, Deep Recon</span><em class="src s-bmad">BMAD</em></li>
+    <li><b>Specify it</b><span>Spec, PRD, Product Brief</span><em class="src s-bmad">BMAD</em></li>
+    <li><b>Design it</b><span>UX, Architecture, Epics and Stories</span><em class="src s-bmad">BMAD</em></li>
+    <li><b>Build it</b><span>Build, one ticket per git worktree</span><em class="src s-bmad">BMAD</em></li>
+    <li><b>Break it</b><span>Code Review, then an adversarial attack</span><em class="src s-both">BMAD + BMAD Next</em></li>
+    <li><b>Prove it</b><span>Real test counts, traceability, NFR evidence</span><em class="src s-both">BMAD + BMAD Next</em></li>
+    <li><b>Ship it</b><span>Fail-closed release gate, your named approval</span><em class="src s-next">BMAD Next</em></li>
+    <li><b>Learn from it</b><span>Retrospective and a project brain</span><em class="src s-bmad">BMAD</em></li>
+  </ol>
+
+  <div class="bmad-split">
+    <div>
+      <h3 class="sub">The BMAD team</h3>
+      <p class="sub-p">BMAD's agents are experts with names, a point of view, and one job each. BMAD Next calls them at the right step, and you can talk to any of them directly.</p>
+      <ul class="personas">
+        <li><span class="mono-av a-an">M</span><div><b>Mary</b><i>Business analyst</i><p>Market and domain research, requirements, the product brief.</p></div></li>
+        <li><span class="mono-av a-pm">J</span><div><b>John</b><i>Product manager</i><p>Turns the idea into a PRD with requirements you can test.</p></div></li>
+        <li><span class="mono-av a-ux">S</span><div><b>Sally</b><i>UX designer</i><p>Flows, screens, and the experience before any code exists.</p></div></li>
+        <li><span class="mono-av a-ar">W</span><div><b>Winston</b><i>Architect</i><p>The decisions that keep separately built parts consistent.</p></div></li>
+        <li><span class="mono-av a-dev">A</span><div><b>Amelia</b><i>Developer</i><p>Implements stories and code changes, with tests.</p></div></li>
+        <li><span class="mono-av a-qa">M</span><div><b>Murat</b><i>Test architect</i><p>Test strategy, automation, traceability, and quality gates.</p></div></li>
+      </ul>
+    </div>
+    <div>
+      <h3 class="sub">Every BMAD module, in one place</h3>
+      <ul class="modules">
+        <li><b>BMad Method</b><span>Analysis, planning, solutioning, and implementation workflows.</span></li>
+        <li><b>Core</b><span>Forge Idea, Party Mode, Advanced Elicitation, Deep Recon, Review.</span></li>
+        <li><b>Test Architecture Enterprise</b><span>Test design, ATDD, automation, NFR evidence, traceability.</span></li>
+        <li><b>Creative Intelligence Suite</b><span>Design thinking, problem solving, innovation strategy, storytelling.</span></li>
+        <li><b>BMad Builder</b><span>Build your own agents, workflows, and modules.</span></li>
+        <li><b>Game Dev Studio</b><span>Game briefs, design documents, and production sprints.</span></li>
+      </ul>
+      <div class="dogfood">
+        <b>Built with BMAD, for BMAD</b>
+        <p>BMAD Next was planned and built with the BMAD Method itself: analysis first, then a PRD, architecture, and stories, before the code. The tool now runs that same discipline for you, and refuses to call anything done without proof.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ how it works: the gate rail -->
+<section class="how" id="how" aria-labelledby="how-title">
+  <div class="section-intro">
+    <h2 id="how-title">From one sentence to a release you can trust</h2>
+    <p>Every mission walks the same line. Each step leaves evidence, and a step that fails stops the line until it is repaired, not until someone looks away.</p>
+  </div>
+
+  <div class="rail-wrap">
+    <div class="rail-sticky">
+      <figure class="panel-shot">
+        <img id="rail-shot" src="assets/panel-running.png" alt="The BMAD Next panel while a mission runs: the Jarvis core, telemetry, and the progress rail." width="720" height="1600" loading="lazy" />
+      </figure>
+    </div>
+
+    <ol class="rail" id="rail">
+      <li data-shot="panel-start.png">
+        <span class="node"></span>
+        <div><span class="skills">mission</span><h3>Describe it</h3><p>One sentence in the panel, or say it out loud. "A todo app that keeps my list after a reload" is enough to start.</p></div>
+      </li>
+      <li data-shot="panel-start.png">
+        <span class="node"></span>
+        <div><span class="skills">bmad-forge-idea</span><h3>Forge the idea</h3><p>Three hard questions: who must succeed, what counts as done, what is out of scope. The model proposes answers and records them as assumptions you can see.</p></div>
+      </li>
+      <li data-shot="panel-running.png">
+        <span class="node"></span>
+        <div><span class="skills">bmad-spec, bmad-prd, bmad-architecture</span><h3>Spec, PRD, architecture</h3><p>Planning skills write real documents into your repo. A step that writes outside its folder is quarantined; one that claims success without its files is retried.</p></div>
+      </li>
+      <li data-shot="panel-running.png" data-you>
+        <span class="node"></span>
+        <div><span class="skills">ticket tree</span><h3>You accept the tickets</h3><p>The work is cut into tickets. Nothing is built until a named person accepts the tree, with a click or by telling Jarvis.</p></div>
+      </li>
+      <li data-shot="panel-listening.png">
+        <span class="node"></span>
+        <div><span class="skills">bmad-build</span><h3>Build in isolation</h3><p>Each ticket gets its own git worktree. The coding agent writes the code and tests, then runs the tests itself before it may stop.</p></div>
+      </li>
+      <li data-shot="panel-listening.png">
+        <span class="node"></span>
+        <div><span class="skills">unit evidence</span><h3>Tests that really ran</h3><p>A green exit code is not enough. A test script that prints "verified" without running a single test is rejected.</p></div>
+      </li>
+      <li data-shot="panel-listening.png">
+        <span class="node"></span>
+        <div><span class="skills">bmad-code-review, attack</span><h3>Review, then attack</h3><p>A reviewer reads the diff against the requirements. An attacker then tries to break it. Either one can send the ticket back for repair.</p></div>
+      </li>
+      <li data-shot="panel-approve.png">
+        <span class="node"></span>
+        <div><span class="skills">architecture check, traceability</span><h3>Architecture and traceability</h3><p>What was built is checked against what was declared, and every requirement is traced to the evidence that proves it.</p></div>
+      </li>
+      <li data-shot="panel-approve.png" data-you>
+        <span class="node"></span>
+        <div><span class="skills">release gate</span><h3>You approve the release</h3><p>When every automated gate passes, the release waits for your name and your reason. Jarvis never approves on its own.</p></div>
+      </li>
+      <li data-shot="panel-history.png">
+        <span class="node"></span>
+        <div><span class="skills">history, project brain</span><h3>Released, and remembered</h3><p>The release is recorded with its evidence. Every mission stays in your history, one click away.</p></div>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ Jarvis -->
+<section class="jarvis" id="jarvis" aria-labelledby="jarvis-title">
+  <div class="section-intro">
+    <h2 id="jarvis-title">Talk to Jarvis in your own language</h2>
+    <p>Say "Hey Jarvis" and your request. It wakes, understands, acts through the same checked commands as the buttons, and answers in the language you spoke.</p>
+  </div>
+
+  <div class="jarvis-grid">
+    <article class="feat feat-wide">
+      <div class="feat-art wave" id="wave" aria-hidden="true"></div>
+      <h3>"Hey Jarvis" wakes it</h3>
+      <p>Switch on the wake phrase and Jarvis waits for its name, in English or Hindi script. Anything you say after it is carried out at once: "Hey Jarvis, build me a pomodoro timer."</p>
+    </article>
+    <article class="feat">
+      <h3>Hindi, Hinglish, English, and more</h3>
+      <p>Speech is recognised on your machine, which also detects the language. Ask "अभी क्या चल रहा है?" and hear the answer in Hindi, in a Hindi voice.</p>
+    </article>
+    <article class="feat">
+      <h3>Hands-free conversation</h3>
+      <p>Talk without holding a button. Jarvis mutes its own microphone while it thinks and speaks, so it never answers itself.</p>
+    </article>
+    <article class="feat">
+      <h3>It tells you what the team is doing</h3>
+      <p>"The Frontend Developer is building ticket 1.1." "Review found two blocking issues." Updates arrive as they happen, translated into your language.</p>
+    </article>
+    <article class="feat">
+      <h3>Full control, by voice</h3>
+      <p>Create a mission, continue, pause, stop, accept the tickets, approve the release with your reason. Every decision is recorded under your name.</p>
+    </article>
+    <article class="feat">
+      <h3>Push-to-talk when you prefer</h3>
+      <p>Hold the Jarvis core, speak, let go. The microphone records only while you hold it, and typing works everywhere too.</p>
+    </article>
+    <article class="feat">
+      <h3>Answers from facts only</h3>
+      <p>Jarvis answers from the mission's recorded state: the running step, the agents at work, what is blocked. It is told never to invent progress.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============================================================ agents -->
+<section class="agents" id="agents" aria-labelledby="agents-title">
+  <div class="section-intro">
+    <h2 id="agents-title">A team, not a chatbot</h2>
+    <p>Each role has one job and its own evidence. They disagree on purpose.</p>
+  </div>
+  <ul class="team">
+    <li><b class="role r-plan">Planner</b><p>Writes the spec, PRD, and architecture, then cuts the work into tickets.</p></li>
+    <li><b class="role r-build">Builder</b><p>Implements one ticket in its own worktree and runs its tests before it stops.</p></li>
+    <li><b class="role r-review">Reviewer</b><p>Reads the diff against the requirements and fails what does not meet them.</p></li>
+    <li><b class="role r-attack">Attacker</b><p>Tries to break the build: bad input, corrupted storage, missing checks.</p></li>
+    <li><b class="role r-gate">Release gate</b><p>Passes only on recorded evidence and a named person's approval.</p></li>
+  </ul>
+</section>
+
+<!-- ============================================================ proof -->
+<section class="proof" id="proof" aria-labelledby="proof-title">
+  <div class="section-intro">
+    <h2 id="proof-title">It catches what other agents let through</h2>
+    <p>These happened in real missions while we built BMAD Next. Each one is now a gate.</p>
+  </div>
+  <div class="cases">
+    <article class="case">
+      <span class="verdict v-fail">Rejected</span>
+      <h3>A test that tested nothing</h3>
+      <p>The builder wrote <code>test.mjs</code>, which printed "implementation complete and verified" and exited. The old check saw exit code 0. Now a test script must show a test runner's count of at least one test.</p>
+    </article>
+    <article class="case">
+      <span class="verdict v-repair">Repaired</span>
+      <h3>Saved data nobody checked</h3>
+      <p>Tests and review passed. The attacker then found that the todo app trusted whatever was in <code>localStorage</code>. The repair added validation, and a fresh review and attack passed before release.</p>
+    </article>
+    <article class="case">
+      <span class="verdict v-hold">Quarantined</span>
+      <h3>A file written where it did not belong</h3>
+      <p>A planning step wrote a file named <code>...</code> into the project root. Planning may only write under its own folder, so the file was moved to quarantine and the step was blocked.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============================================================ the panel -->
+<section class="gallery" aria-labelledby="gallery-title">
+  <div class="section-intro">
+    <h2 id="gallery-title">One panel for the whole mission</h2>
+    <p>The mission, your next decision, progress, evidence, and Jarvis, on a single page that never reloads under your cursor.</p>
+  </div>
+  <div class="shots">
+    <figure><img src="assets/panel-start.png" alt="The start screen: What should BMAD build?" width="720" height="1600" loading="lazy" /><figcaption>Start with one sentence</figcaption></figure>
+    <figure><img src="assets/panel-running.png" alt="A running mission with the Jarvis core and telemetry." width="720" height="1600" loading="lazy" /><figcaption>Watch it work</figcaption></figure>
+    <figure><img src="assets/panel-approve.png" alt="The release approval card." width="720" height="1600" loading="lazy" /><figcaption>Decide when it matters</figcaption></figure>
+    <figure><img src="assets/panel-history.png" alt="Mission history with search." width="720" height="1600" loading="lazy" /><figcaption>Every mission, remembered</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============================================================ get started -->
+<section class="start" id="start" aria-labelledby="start-title">
+  <div class="section-intro">
+    <h2 id="start-title">Running in three steps</h2>
+    <p>BMAD Next is a VS Code extension with a local control plane. Build it once, point it at a model, and talk.</p>
+  </div>
+  <ol class="steps">
+    <li>
+      <h3>Build and install</h3>
+      <pre><code>npm install
+npm run build
+code --extensionDevelopmentPath=packages/vscode .</code></pre>
+    </li>
+    <li>
+      <h3>Point it at your model</h3>
+      <pre><code># .env
+BMAD_MODEL=ollama/qwen3-coder:30b
+OPENCODE_CONFIG=.harness/ollama.opencode.json
+BMAD_JARVIS_MODEL=qwen3-coder:30b</code></pre>
+    </li>
+    <li>
+      <h3>Say it</h3>
+      <pre><code>brew install whisper-cpp
+# In the BMAD panel, switch on "Hey Jarvis", then:
+"Hey Jarvis, build me a todo app."</code></pre>
+    </li>
+  </ol>
+</section>
+
+<!-- ============================================================ FAQ -->
+<section class="faq" aria-labelledby="faq-title">
+  <h2 id="faq-title">Questions</h2>
+  <details>
+    <summary>Can it release without me?</summary>
+    <p>No. The release gate needs every automated check to pass and a named person's approval with a reason. Jarvis can record your approval when you say it, but it never approves on its own.</p>
+  </details>
+  <details>
+    <summary>How fast is it?</summary>
+    <p>It depends on where your model runs. On a CPU-only server, a planning step takes one to two minutes and a spoken answer a few seconds. A GPU makes both much faster.</p>
+  </details>
+  <details>
+    <summary>Which languages does Jarvis understand?</summary>
+    <p>Whatever Whisper recognises and your model can answer in. We use it in English, Hindi, and Hinglish; Jarvis speaks with an installed macOS voice for the detected language.</p>
+  </details>
+  <details>
+    <summary>Is the microphone always on?</summary>
+    <p>Only while you switch on hands-free conversation or "Hey Jarvis", and the status bar says so the whole time. Push-to-talk records only while you hold the button.</p>
+  </details>
+  <details>
+    <summary>What happens when a step fails?</summary>
+    <p>The mission stops at that step and tells you why in plain words. Failed tests, a failed review, or a failed attack send the ticket to repair first; you can also stop the autopilot at any moment and continue later.</p>
+  </details>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-brand"><img src="assets/mark.svg" alt="" width="22" height="22" /><span>BMAD Next</span></div>
+  <p>Built on the open-source <a href="https://github.com/bmad-code-org/BMAD-METHOD">BMAD Method</a> (MIT) by BMad Code, LLC, pinned to commit <code>5e33d3c</code>. BMAD Next is an independent control plane and is not an official BMad product. BMAD is a trademark of BMad Code, LLC.</p>
+</footer>
+
+<script src="main.js" defer></script>
+</body>
+</html>

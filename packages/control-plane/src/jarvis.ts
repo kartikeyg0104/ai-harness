@@ -384,13 +384,17 @@ export type JarvisIntentName =
   | "evidence"
   | "summarize"
   | "exit_jarvis"
+  | "accept_tickets"
+  | "approve_release"
   | "unknown";
 
-export const JARVIS_INTENTS: JarvisIntentName[] = ["create_mission", "status", "agents", "phase", "blocked", "review", "continue", "pause", "resume", "stop", "evidence", "summarize", "exit_jarvis", "unknown"];
+export const JARVIS_INTENTS: JarvisIntentName[] = ["create_mission", "status", "agents", "phase", "blocked", "review", "continue", "pause", "resume", "stop", "evidence", "summarize", "exit_jarvis", "accept_tickets", "approve_release", "unknown"];
 
 export interface JarvisIntent {
   name: JarvisIntentName;
   idea?: string;
+  /** Why the person approves a release; an approval is recorded with its reason or not at all. */
+  reason?: string;
 }
 
 /**
@@ -408,6 +412,11 @@ export function validateIntent(raw: unknown): { ok: true; intent: JarvisIntent }
     if (idea.length > 1000) return { ok: false, reason: "That mission description is too long." };
     return { ok: true, intent: { name: "create_mission", idea } };
   }
+  if (name === "approve_release") {
+    const reason = typeof record.reason === "string" ? record.reason.replace(/\s+/g, " ").trim().slice(0, 500) : "";
+    if (reason.length < 3) return { ok: false, reason: "Tell me why you approve the release, and I will record it with your approval." };
+    return { ok: true, intent: { name: "approve_release", reason } };
+  }
   return { ok: true, intent: { name: name as JarvisIntentName } };
 }
 
@@ -418,6 +427,9 @@ export function parseCommand(text: string): JarvisIntent {
   const build = clean.match(/^(?:please\s+)?(?:build|create|make|start a mission to build|new mission:?)\s+(.+)$/i);
   if (build && !/^(the|this|it|ticket)\b/i.test(build[1] ?? "")) return { name: "create_mission", idea: `Build ${build[1]?.trim()}` };
   if (/\b(exit|leave|close|turn off)\b.*\bjarvis\b|^exit$/.test(lower)) return { name: "exit_jarvis" };
+  if (/^(?:please\s+)?accept\b.*\b(tickets?|ticket tree|stories)\b/.test(lower)) return { name: "accept_tickets" };
+  const approve = clean.match(/^(?:please\s+)?approve(?: the)? release\b[\s,:;.-]*(?:because\s+)?(.*)$/i);
+  if (approve) return { name: "approve_release", reason: (approve[1] ?? "").trim() };
   if (/\b(what('?s| is)\s+blocked|blocker|blocking|what'?s wrong|stuck)\b/.test(lower)) return { name: "blocked" };
   if (/\b(reviewer|review)\b/.test(lower)) return { name: "review" };
   if (/\b(which|what|how many)\b.*\bagents?\b|\bagents?\b.*\brunning\b/.test(lower)) return { name: "agents" };

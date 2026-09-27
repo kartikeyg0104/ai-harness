@@ -24,6 +24,10 @@ export interface InterpretedCommand {
   transcript: string;
   intent: unknown;
   provider: string;
+  /** What to say back, already in the person's language, when the provider writes its own answer. */
+  reply?: string;
+  /** ISO 639-1 code of the language the person used. */
+  language?: string;
 }
 
 export interface VoiceInputProvider {
@@ -37,14 +41,18 @@ export interface VoiceInputProvider {
 export interface VoiceIntentProvider {
   readonly id: string;
   availability(): Availability;
-  interpretText(text: string, context: Record<string, unknown>): Promise<InterpretedCommand>;
+  interpretText(text: string, context: Record<string, unknown>, language?: string): Promise<InterpretedCommand>;
   interpretAudio(clip: AudioClip, context: Record<string, unknown>): Promise<InterpretedCommand>;
+  /** Typed requests can work when speech cannot (for example, the model is reachable but no recogniser is installed). */
+  textReady?(): boolean;
+  /** Puts an English sentence into another language. */
+  translate?(text: string, language: string): Promise<string>;
 }
 
 export interface VoiceOutputProvider {
   readonly id: string;
   availability(): Availability;
-  speak(text: string): Promise<void>;
+  speak(text: string, language?: string): Promise<void>;
   stop(): void;
 }
 
@@ -188,12 +196,29 @@ export class SystemSpeechOutput implements VoiceOutputProvider {
     return this.which("say") ? { ok: true, reason: "macOS say" } : { ok: false, reason: "say is not on PATH." };
   }
 
-  speak(text: string): Promise<void> {
+  private voices: Map<string, string> | null = null;
+
+  /** An installed macOS voice for a language (Lekha for Hindi), or the system voice when none is installed. */
+  voiceFor(language: string | undefined): string | null {
+    if (!language || language === "en") return null;
+    if (!this.voices) {
+      this.voices = new Map();
+      const listed = spawnSync("say", ["-v", "?"], { encoding: "utf8" });
+      for (const line of String(listed.stdout ?? "").split("\n")) {
+        const match = /^(.+?)\s+([a-z]{2})_[A-Z]{2}\s+#/.exec(line);
+        if (match && !this.voices.has(match[2] as string)) this.voices.set(match[2] as string, (match[1] as string).trim());
+      }
+    }
+    return this.voices.get(language) ?? null;
+  }
+
+  speak(text: string, language?: string): Promise<void> {
     this.stop();
     return new Promise((resolve, reject) => {
       let child: ChildProcess;
       try {
-        child = this.spawner("say", ["-r", "190", text]);
+        const voice = this.voiceFor(language);
+        child = this.spawner("say", [...(voice ? ["-v", voice] : []), "-r", "190", text]);
       } catch (error) {
         reject(new VoiceError("failed", `Speech failed: ${error instanceof Error ? error.message : String(error)}`));
         return;

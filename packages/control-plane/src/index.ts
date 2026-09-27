@@ -5,7 +5,7 @@ export type { PlaneOptions } from "./plane";
 export { parseIntent } from "./intent";
 export type { Intent, IntentName } from "./intent";
 export { renderMissionControl, escapeHtml, criterionLabel, gateLabel } from "./render";
-export { processRunner } from "./runner";
+export { processRunner, stepPidDir, stopRunningSteps } from "./runner";
 export { CommandModelRunner, parseRunnerArgs, redactSecrets } from "./model-runner";
 export { CommandReviewer, REVIEW_PROMPT_VERSION, downgradeReview, judgeReview, repairBrief, repairTask, resolveReviewerConfig, reviewPrompt } from "./reviewer";
 export { ATTACK_PROMPT_VERSION, CommandAttacker, applyAttackSurface, attackCode, attackPrompt, downgradeAttack, judgeAttack, resolveAttackerConfig } from "./attack";

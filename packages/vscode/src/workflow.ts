@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import fs from "node:fs";
 import path from "node:path";
 import { SHARE_ENV, Worker } from "node:worker_threads";
-import type { BmadControlPlane, Mission } from "@bmad-next/control-plane";
+import { stopRunningSteps, type BmadControlPlane, type Mission } from "@bmad-next/control-plane";
 import type { WorkerMethod } from "./plane-worker";
 
 export interface WorkflowHost {
@@ -21,9 +21,19 @@ export function autopilotRunning(): boolean {
   return busy === "autopilot";
 }
 
+/** The autopilot worker while it runs, so Stop can end it; and whether a person just stopped it. */
+let autopilotWorker: { worker: Worker; missionId: string } | null = null;
+let stoppedByPerson = false;
+
 function runInWorker(root: string, method: WorkerMethod, args: unknown[], onProgress?: (message: string) => void): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(path.join(__dirname, "plane-worker.js"), { workerData: { root, method, args }, env: SHARE_ENV });
+    if (method === "autopilot") {
+      autopilotWorker = { worker, missionId: String(args[0] ?? "") };
+      worker.once("exit", () => {
+        if (autopilotWorker?.worker === worker) autopilotWorker = null;
+      });
+    }
     let settled = false;
     worker.on("message", (reply: { ok?: boolean; progress?: string; result?: unknown; error?: string }) => {
       if (typeof reply.progress === "string") {
@@ -212,12 +222,7 @@ export function registerWorkflowCommands(context: vscode.ExtensionContext, host:
       return `${report?.state ?? "?"} — ${(report?.criteria ?? []).map((item) => `${item.label} ${item.state}`).join(", ")}`;
     }),
     vscode.commands.registerCommand("bmad-next.autopilot", () => autopilot(host)),
-    vscode.commands.registerCommand("bmad-next.stopAutopilot", () => {
-      const mission = activeMission(host);
-      if (!mission) return;
-      fs.writeFileSync(path.join(host.root, ".bmad-next", "missions", mission.id, "autopilot.stop"), new Date().toISOString());
-      void vscode.window.showInformationMessage("BMAD autopilot will stop after the current step.");
-    }),
+    vscode.commands.registerCommand("bmad-next.stopAutopilot", () => stopAutopilotNow(host)),
     vscode.commands.registerCommand("bmad-next.requireAllGates", async () => {
       const mission = activeMission(host);
       if (!mission) return;
@@ -270,6 +275,8 @@ async function autopilot(host: WorkflowHost): Promise<void> {
         },
       )) as AutopilotOutcome;
     } catch (error) {
+      // A person's Stop ends the worker on purpose; that is not a failure.
+      if (stoppedByPerson) return;
       const text = error instanceof Error ? error.message : String(error);
       host.output.appendLine(`[${stamp()}] ✖ Autopilot: ${text}`);
       void vscode.window.showErrorMessage(`BMAD autopilot failed: ${text}`, "Show Output").then((pick) => pick && host.output.show(true));
@@ -288,7 +295,7 @@ async function autopilot(host: WorkflowHost): Promise<void> {
     }
     if (outcome.status === "needs-release-approval") {
       host.refresh();
-      void vscode.window.showInformationMessage(`Every automated gate passed for ${mission.id}. Approve the release in Mission Control.`);
+      void vscode.window.showInformationMessage(`Every automated gate passed for ${mission.id}. Approve the release in the BMAD panel.`);
       const approved = await waitFor(host, () => host.plane().mission(mission.id).approvals.some((item) => item.category === "release" && item.decision === "approved"));
       if (approved) {
         // The release gate runs as its own operation, which refuses to start while the autopilot holds the lock.
@@ -304,30 +311,61 @@ async function autopilot(host: WorkflowHost): Promise<void> {
   }
   } finally {
     busy = null;
+    stoppedByPerson = false;
     host.activity(null);
     host.refresh();
   }
 }
 
+/**
+ * Stops the autopilot now, not after the current step: the step's processes (the agent CLI, a test run) are ended,
+ * the worker is terminated, and the stop is recorded. Continuing later retries the step that was running.
+ * Pressing Stop again while it stops does nothing more.
+ */
+async function stopAutopilotNow(host: WorkflowHost): Promise<void> {
+  const mission = activeMission(host);
+  if (!mission) return;
+  const running = autopilotWorker;
+  if (!running) {
+    // Nothing runs in this window; leave a stop request in case another window's autopilot owns the mission.
+    fs.writeFileSync(path.join(host.root, ".bmad-next", "missions", mission.id, "autopilot.stop"), new Date().toISOString());
+    host.refresh();
+    return;
+  }
+  if (stoppedByPerson) return;
+  stoppedByPerson = true;
+  host.activity("stopping");
+  const ended = stopRunningSteps();
+  await running.worker.terminate();
+  autopilotWorker = null;
+  try {
+    host.plane().recordAutopilotAbort(running.missionId, "Stopped by you. Continue to retry the step that was running.");
+  } catch (error) {
+    host.output.appendLine(`[${stamp()}] Stop could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  host.output.appendLine(`[${stamp()}] ■ Autopilot: stopped by you${ended ? ` (${ended} running process${ended === 1 ? "" : "es"} ended)` : ""}.`);
+  host.refresh();
+}
+
 /** Waits for forge answers in Mission Control (or the Answer Forge command), then continues. */
 async function forgeInterview(host: WorkflowHost, mission: Mission): Promise<boolean> {
   host.refresh();
-  void vscode.window.showInformationMessage("Answer the forge questions in BMAD Next Mission Control.");
+  void vscode.window.showInformationMessage("Answer the forge questions in the BMAD panel.");
   const answered = await waitFor(host, () => {
     const current = host.plane().mission(mission.id);
     const questions = current.forge?.questions ?? [];
     return questions.length > 0 && questions.every((question) => current.forge?.answered.includes(question.id));
   });
-  if (!answered) void vscode.window.showWarningMessage("Forge questions are still open in Mission Control.");
+  if (!answered) void vscode.window.showWarningMessage("Forge questions are still open in the BMAD panel.");
   return answered;
 }
 
-/** Waits for a named person to accept the ticket tree in Mission Control. */
+/** Waits for a named person to accept the ticket tree in the BMAD panel. */
 async function acceptTree(host: WorkflowHost): Promise<boolean> {
   const mission = activeMission(host);
   if (!mission) return false;
   host.refresh();
-  void vscode.window.showInformationMessage("Accept the ticket tree in BMAD Next Mission Control.");
+  void vscode.window.showInformationMessage("Accept the ticket tree in the BMAD panel.");
   const accepted = await waitFor(host, () => Boolean(host.plane().mission(mission.id).ticketTreeAccepted));
   if (accepted) host.output.appendLine(`[${stamp()}] Ticket tree accepted.`);
   return accepted;

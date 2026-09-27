@@ -531,6 +531,19 @@ test("forge answers numbered 1..n map to the open questions in order; partial nu
   assert.ok(prompt);
 });
 
+test("a mission from the history becomes the active mission; an unknown or malformed id does not", () => {
+  const plane = new BmadControlPlane(tempProject());
+  const first = plane.createMission("First idea: a todo app");
+  const second = plane.createMission("Second idea: a notes app");
+  assert.equal(plane.mission().id, second.id);
+  assert.equal(plane.openMission(first.id).id, first.id);
+  assert.equal(plane.mission().id, first.id);
+  assert.deepEqual(plane.listMissions().sort(), [first.id, second.id].sort());
+  assert.throws(() => plane.openMission("msn_does_not_exist"), /does not exist/);
+  assert.throws(() => plane.openMission("../../etc"), /not a mission id/);
+  assert.equal(plane.mission().id, first.id);
+});
+
 test("a long idea becomes a title cut at a word, marked with an ellipsis", async () => {
   const { shortTitle } = await import("../plane");
   const idea = "A todo app in plain HTML and CSS with a little JavaScript: add a todo, mark it complete, delete it, and keep the list in localStorage so it survives a reload.";

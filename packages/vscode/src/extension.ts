@@ -1,43 +1,42 @@
 import * as vscode from "vscode";
-import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { BmadControlPlane, criterionLabel, escapeHtml, evaluateRelease, gateLabel, loadProjectEnv, parseIntent, renderMissionControl } from "@bmad-next/control-plane";
+import path from "node:path";
+import { BmadControlPlane, evaluateRelease, loadProjectEnv, parseIntent } from "@bmad-next/control-plane";
 import type { Mission } from "@bmad-next/control-plane";
 import { autopilotRunning, registerWorkflowCommands } from "./workflow";
 import { FfmpegMicrophoneInput, GeminiIntentProvider, SystemSpeechOutput, TextCommandIntentProvider } from "./jarvis/providers";
 import { JarvisSession, type JarvisSettings, type TranscriptEntry } from "./jarvis/session";
-import { JarvisView, type JarvisAction } from "./jarvis/view";
+import { ContinuousMicrophone, LocalIntentProvider, WhisperService, localVoiceConfig } from "./jarvis/local";
+import { HomeView, type HistoryItem, type HomeAction, type HomeGate, type HomeState } from "./home/view";
 
 let plane: BmadControlPlane | null = null;
-let missionView: vscode.WebviewView | null = null;
-let missionWebview: vscode.Webview | null = null;
-const emitters = new Map<string, vscode.EventEmitter<void>>();
-const composer = { error: null as string | null, draft: "", focus: false };
+let home: HomeView | null = null;
+const composer = { error: null as string | null };
 /** What a running autopilot or command is doing, shown instead of the stored loop state while it runs. */
 let activity: string | null = null;
 let jarvis: JarvisSession | null = null;
+let globalState: vscode.Memento | null = null;
 const IDEA_PLACEHOLDER = "Describe what you want to build...";
-const IDEA_EXAMPLE = "Build a simple todo web app with add, complete, delete, and local persistence.";
 
 export function activate(context: vscode.ExtensionContext): void {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!root) return;
   loadProjectEnv(root);
   plane = new BmadControlPlane(root);
+  globalState = context.globalState;
   const diagnostics = vscode.languages.createDiagnosticCollection("bmad-next");
   context.subscriptions.push(diagnostics);
+  home = new HomeView(context.extensionUri, (action) => void onHomeAction(action, root, diagnostics));
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("bmad-next.missionControl", new MissionView(diagnostics)),
-    registerTree("bmad-next.requirements", () => requirementItems()),
-    registerTree("bmad-next.tickets", () => ticketItems()),
-    registerTree("bmad-next.evidence", () => evidenceItems()),
-    registerTree("bmad-next.findings", () => findingItems()),
-    registerTree("bmad-next.agents", () => agentItems()),
-    registerTree("bmad-next.release", () => releaseItems()),
-    registerTree("bmad-next.brain", () => brainItems()),
+    vscode.window.registerWebviewViewProvider("bmad-next.home", home, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.commands.registerCommand("bmad-next.refresh", () => refresh(diagnostics)),
     vscode.commands.registerCommand("bmad-next.mission", () => newMission(diagnostics)),
+    vscode.commands.registerCommand("bmad-next.history", async () => {
+      await vscode.commands.executeCommand("bmad-next.home.focus");
+      home?.show("history");
+    }),
     vscode.commands.registerCommand("bmad-next.forgeAnswer", () => forgeAnswer(diagnostics)),
     vscode.commands.registerCommand("bmad-next.harden", () => harden(diagnostics)),
     vscode.commands.registerCommand("bmad-next.acceptTickets", () => acceptTickets(diagnostics)),
@@ -105,7 +104,7 @@ export function activate(context: vscode.ExtensionContext): void {
     state: context.globalState,
     activity: (text) => {
       activity = text;
-      if (missionWebview) paintMission(missionWebview);
+      pushHome();
     },
   });
   output.appendLine(`BMAD Next activated for ${root}. Runtime ${process.env.BMAD_RUNTIME || "unset"}, model ${process.env.BMAD_MODEL || "unset"}.`);
@@ -117,301 +116,184 @@ export function deactivate(): void {
   jarvis?.deactivate();
   jarvis = null;
   plane = null;
+  home = null;
 }
 
-class MissionView implements vscode.WebviewViewProvider {
-  constructor(private readonly diagnostics: vscode.DiagnosticCollection) {}
+async function onHomeAction(action: HomeAction, root: string, diagnostics: vscode.DiagnosticCollection): Promise<void> {
+  if (action.type === "submit") submitMission(action.text, diagnostics);
+  else if (action.type === "ask") await askJarvis(action.text);
+  else if (action.type === "forgeAnswer") submitForgeAnswer(action.text, diagnostics);
+  else if (action.type === "acceptTickets") submitTicketAcceptance(action.identity, diagnostics);
+  else if (action.type === "approveRelease") submitReleaseApproval(action.identity, action.reason, diagnostics);
+  else if (action.type === "resumeAutopilot") void vscode.commands.executeCommand("bmad-next.autopilot");
+  else if (action.type === "stopAutopilot") void vscode.commands.executeCommand("bmad-next.stopAutopilot");
+  else if (action.type === "openFile") openInsideWorkspace(root, action.path);
+  else if (action.type === "loadHistory") home?.history(missionHistory());
+  else if (action.type === "openMission") openMissionFromHistory(action.id, diagnostics);
+  else if (action.type === "cancel") composer.error = null;
+  else if (action.type === "jarvis") await vscode.commands.executeCommand(JARVIS_COMMANDS[action.action]);
+}
 
-  resolveWebviewView(webviewView: vscode.WebviewView): void {
-    webviewView.webview.options = { enableScripts: true, localResourceRoots: [] };
-    missionView = webviewView;
-    missionWebview = webviewView.webview;
-    missionPainted = null;
-    webviewView.webview.onDidReceiveMessage((msg: { type?: string; text?: unknown; identity?: unknown; reason?: unknown }) => {
-      if (msg.type === "submit") submitMission(String(msg.text ?? ""), this.diagnostics);
-      if (msg.type === "forgeAnswer") submitForgeAnswer(String(msg.text ?? ""), this.diagnostics);
-      if (msg.type === "acceptTickets") submitTicketAcceptance(String(msg.identity ?? ""), this.diagnostics);
-      if (msg.type === "approveRelease") submitReleaseApproval(String(msg.identity ?? ""), String(msg.reason ?? ""), this.diagnostics);
-      if (msg.type === "resumeAutopilot") void vscode.commands.executeCommand("bmad-next.autopilot");
-      if (msg.type === "cancel") {
-        composer.error = null;
-        composer.draft = "";
-      }
-    });
-    webviewView.onDidDispose(() => {
-      missionView = null;
-      missionWebview = null;
-      missionPainted = null;
-    });
-    paintMission(webviewView.webview);
+const JARVIS_COMMANDS: Record<Extract<HomeAction, { type: "jarvis" }>["action"], string> = {
+  activate: "bmad-next.jarvis.activate",
+  exit: "bmad-next.jarvis.exit",
+  pause: "bmad-next.jarvis.pause",
+  resume: "bmad-next.jarvis.resume",
+  stopSpeaking: "bmad-next.jarvis.stopSpeaking",
+  pttStart: "bmad-next.jarvis.pttStart",
+  pttStop: "bmad-next.jarvis.pttStop",
+  handsFree: "bmad-next.jarvis.handsFree",
+  wakeWord: "bmad-next.jarvis.wakeWord",
+};
+
+/** Typing to Jarvis is an explicit request to talk to it, so a switched-off Jarvis is switched on first. */
+async function askJarvis(text: string): Promise<void> {
+  if (!jarvis || !text.trim()) return;
+  if (jarvis.machine.state === "JARVIS_OFF") await vscode.commands.executeCommand("bmad-next.jarvis.activate");
+  await jarvis.submitText(text);
+}
+
+/** Every mission in this project, newest activity first. A mission that cannot be read is left out, not guessed at. */
+function missionHistory(): HistoryItem[] {
+  if (!plane) return [];
+  const current = safeActiveId();
+  const items: HistoryItem[] = [];
+  for (const id of plane.listMissions()) {
+    try {
+      const mission = plane.mission(id);
+      items.push({ id: mission.id, title: mission.title, loop: mission.loop, createdAt: mission.createdAt, updatedAt: mission.updatedAt, active: mission.id === current });
+    } catch {
+      // Skip unreadable mission folders.
+    }
+  }
+  return items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function safeActiveId(): string | null {
+  try {
+    return plane?.mission().id ?? null;
+  } catch {
+    return null;
   }
 }
 
-function registerTree(id: string, items: () => vscode.TreeItem[]): vscode.Disposable {
-  const emitter = new vscode.EventEmitter<void>();
-  emitters.set(id, emitter);
-  const provider: vscode.TreeDataProvider<vscode.TreeItem> = {
-    onDidChangeTreeData: emitter.event,
-    getTreeItem: (item) => item,
-    getChildren: () => items(),
-  };
-  return vscode.window.registerTreeDataProvider(id, provider);
+function openMissionFromHistory(id: string, diagnostics: vscode.DiagnosticCollection): void {
+  // The autopilot drives one mission; switching under it would hand its next step to another mission.
+  if (autopilotRunning()) {
+    void vscode.window.showWarningMessage("BMAD: stop the autopilot before opening another mission.");
+    home?.show("mission");
+    return;
+  }
+  try {
+    requirePlane().openMission(id);
+  } catch (error) {
+    void vscode.window.showErrorMessage(`BMAD: ${message(error)}`);
+    return;
+  }
+  refresh(diagnostics);
+  home?.show("mission");
+}
+
+/** Evidence records are files under the project; anything else is refused rather than opened. */
+function openInsideWorkspace(root: string, file: string): void {
+  const absolute = path.resolve(root, file);
+  if (absolute !== root && !absolute.startsWith(root + path.sep)) return;
+  if (!fs.existsSync(absolute)) {
+    void vscode.window.showWarningMessage(`BMAD: ${path.relative(root, absolute)} no longer exists.`);
+    return;
+  }
+  void vscode.window.showTextDocument(vscode.Uri.file(absolute), { preview: true });
 }
 
 function refresh(diagnostics: vscode.DiagnosticCollection): void {
-  for (const emitter of emitters.values()) emitter.fire();
-  if (missionWebview) paintMission(missionWebview);
+  pushHome();
   publishDiagnostics(diagnostics);
 }
 
-/** The last page set on the Mission view, without its nonce, so an unchanged refresh does not reload the webview. */
-let missionPainted: string | null = null;
-
-function paintMission(webview: vscode.Webview): void {
-  const nonce = crypto.randomBytes(16).toString("base64");
-  const html = missionPage(nonce);
-  // Reloading the webview resets its scroll position, focus, and any text a person is typing, so only reload on change.
-  const content = html.split(nonce).join("");
-  if (content === missionPainted) return;
-  missionPainted = content;
-  webview.html = html;
+function pushHome(): void {
+  home?.post(homeState());
 }
 
-function missionPage(nonce: string): string {
-  if (!plane) return composerPage(nonce, "<p>Open a workspace folder.</p>");
+function homeState(): HomeState {
   let mission: Mission | null = null;
   try {
-    mission = plane.mission();
+    mission = plane?.mission() ?? null;
   } catch {
     mission = null;
   }
-  if (missionView) missionView.description = mission ? `${mission.id} · ${activity ?? mission.loop}` : "no mission";
-  const form = renderComposer(mission, nonce);
-  composer.focus = false;
-  const gates = renderHumanGates(mission, nonce);
-  if (!mission) return composerPage(nonce, `${form}${gates}`);
-  let html: string;
-  try {
-    html = renderMissionControl(mission);
-  } catch (error) {
-    return composerPage(nonce, `${form}${gates}<p class="error">Mission Control could not render ${escapeHtml(mission.id)}: ${escapeHtml(message(error))}</p>`);
-  }
-  // Mission Control ships a script-free CSP; widen it only for this nonce so the composer can post back.
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />`;
-  const csped = html.replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, csp);
-  return csped.includes("<body>") && csped !== html ? csped.replace("<body>", `<body>${form}${gates}`) : composerPage(nonce, `${form}${gates}<p class="error">Mission Control layout changed; showing the composer only.</p>`);
-}
-
-function composerPage(nonce: string, body: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
-<title>BMAD Next</title>
-<style>body { margin: 0; padding: 12px 16px; color: var(--vscode-foreground); font: 13px/1.45 var(--vscode-font-family); }</style>
-</head>
-<body>${body}</body>
-</html>`;
-}
-
-function renderComposer(mission: Mission | null, nonce: string): string {
-  const error = composer.error ? `<p class="error" role="alert" id="error">${escapeHtml(composer.error)}</p>` : `<p class="error" role="alert" id="error" hidden></p>`;
-  const form = `
-  <label for="idea">${mission ? "New mission idea" : "Project idea"}</label>
-  <textarea id="idea" rows="6" placeholder="${escapeHtml(IDEA_PLACEHOLDER)}">${escapeHtml(composer.draft)}</textarea>
-  <p class="hint">Example: <button type="button" class="link" id="example">${escapeHtml(IDEA_EXAMPLE)}</button></p>
-  ${error}
-  <div class="actions">
-    <button type="button" id="submit">Create mission</button>
-    <button type="button" id="cancel" class="secondary">Cancel</button>
-  </div>
-  <p class="hint">Enter creates the mission · Shift+Enter adds a line · Esc cancels. A new mission starts as a draft; nothing is marked complete until evidence exists.</p>`;
-  const body = mission
-    ? `<p class="active">Active mission <code>${escapeHtml(mission.id)}</code> · loop <strong>${escapeHtml(mission.loop)}</strong> · phase <strong>${escapeHtml(mission.phase)}</strong></p>
-<details id="composer"${composer.focus || composer.error ? " open" : ""}><summary>+ Start a new mission</summary>${form}</details>`
-    : `<div id="composer"><h2>Start here: describe your project</h2><p>Type the idea you want BMAD to plan and build in the box below, then press <strong>Create mission</strong>.</p>${form}</div>`;
-  return `<style>
-  .bmad-composer { margin: 0 0 16px; padding: 12px; border: 1px solid var(--vscode-focusBorder, #d6a25e); background: var(--vscode-sideBar-background, #1c1a15); color: var(--vscode-foreground, #f4f0e6); font: 13px/1.45 var(--vscode-font-family, sans-serif); }
-  .bmad-composer h2 { margin: 0 0 6px; font-size: 14px; letter-spacing: 0; text-transform: none; color: inherit; }
-  .bmad-composer label { display: block; font-weight: 600; margin: 8px 0 4px; }
-  .bmad-composer textarea { box-sizing: border-box; width: 100%; min-height: 110px; resize: vertical; padding: 6px 8px; font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, #555); }
-  .bmad-composer textarea:focus { outline: 1px solid var(--vscode-focusBorder); }
-  .bmad-composer .actions { display: flex; gap: 8px; margin: 8px 0; }
-  .bmad-composer button { padding: 4px 12px; font: inherit; cursor: pointer; border: none; color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
-  .bmad-composer button:hover { background: var(--vscode-button-hoverBackground); }
-  .bmad-composer button:disabled { opacity: 0.6; cursor: default; }
-  .bmad-composer button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-  .bmad-composer button.link { padding: 0; background: none; color: var(--vscode-textLink-foreground); text-align: left; }
-  .bmad-composer .hint { margin: 4px 0; opacity: 0.8; font-size: 12px; }
-  .bmad-composer .active { margin: 0 0 6px; }
-  .bmad-composer summary { cursor: pointer; font-weight: 600; }
-  .error { color: var(--vscode-errorForeground, #f48771); }
-</style>
-<section class="bmad-composer">${body}</section>
-<script nonce="${nonce}">
-  const vscode = acquireVsCodeApi();
-  window.bmadVscode = vscode;
-  // Webview state survives the page being reloaded with new content; merge into it so each form keeps its own part.
-  const save = (patch) => vscode.setState(Object.assign({}, vscode.getState() || {}, patch));
-  window.bmadSave = save;
-  const idea = document.getElementById("idea");
-  const submit = document.getElementById("submit");
-  const errorBox = document.getElementById("error");
-  const wrapper = document.getElementById("composer");
-  const saved = vscode.getState();
-  if (!idea.value && saved && saved.draft) idea.value = saved.draft;
-  idea.addEventListener("input", () => save({ draft: idea.value }));
-  function showError(text) { errorBox.textContent = text; errorBox.hidden = !text; }
-  function send() {
-    const text = idea.value.trim();
-    if (!text) { showError("Type a project idea first."); idea.focus(); return; }
-    showError("");
-    submit.disabled = true;
-    submit.textContent = "Creating mission…";
-    save({ draft: "" });
-    vscode.postMessage({ type: "submit", text });
-  }
-  function cancel() {
-    idea.value = "";
-    showError("");
-    save({ draft: "" });
-    vscode.postMessage({ type: "cancel" });
-    if (wrapper.tagName === "DETAILS") wrapper.open = false;
-  }
-  function focusIdea() { if (wrapper.tagName === "DETAILS") wrapper.open = true; idea.focus(); window.bmadFocused = true; }
-  submit.addEventListener("click", send);
-  document.getElementById("cancel").addEventListener("click", cancel);
-  document.getElementById("example").addEventListener("click", () => { idea.value = ${JSON.stringify(IDEA_EXAMPLE)}; save({ draft: idea.value }); idea.focus(); });
-  idea.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
-    else if (event.key === "Escape") { event.preventDefault(); cancel(); }
-  });
-  window.addEventListener("message", (event) => { if (event.data && event.data.type === "focus") focusIdea(); });
-  if (${mission ? String(composer.focus || Boolean(composer.error)) : "true"}) focusIdea();
-  // A refresh reloads the page; return to where the person was reading unless a form just took focus.
-  window.addEventListener("scroll", () => save({ scroll: window.scrollY }), { passive: true });
-  window.addEventListener("DOMContentLoaded", () => { if (!window.bmadFocused && saved && saved.scroll) window.scrollTo(0, saved.scroll); });
-</script>`;
-}
-
-function renderHumanGates(mission: Mission | null, nonce: string): string {
-  if (!mission) return "";
-  const forge = mission.forge;
-  const open = forge?.outcome === "active" ? forge.questions.find((question) => !forge.answered.includes(question.id)) : undefined;
-  if (open && forge) {
-    return humanGatePage(
-      nonce,
-      `<h2>Forge question ${(forge.answered.length + 1).toString()} of ${forge.questions.length.toString()}</h2>
-      <p>${escapeHtml(open.prompt)}</p>
-      <p class="hint">${escapeHtml(open.why)}</p>
-      <label for="gate-text">Your answer</label>
-      <textarea id="gate-text" rows="5" placeholder="${escapeHtml(open.why)}"></textarea>
-      <div class="actions"><button type="button" id="gate-submit">Record answer</button></div>`,
-      `{ type: "forgeAnswer", text: text }`,
-      `forge:${open.id}`,
-    );
-  }
-  if (mission.tickets.length > 0 && !mission.ticketTreeAccepted) {
-    const tree = mission.tickets.map((ticket) => `<li><code>${escapeHtml(ticket.ref)}</code> ${escapeHtml(ticket.title)}</li>`).join("");
-    return humanGatePage(
-      nonce,
-      `<h2>Accept ticket tree</h2>
-      <p>A named person accepts this tree before BMAD builds it.</p>
-      <ul>${tree}</ul>
-      <label for="gate-text">Your name</label>
-      <textarea id="gate-text" rows="2" placeholder="Name recorded with the acceptance"></textarea>
-      <div class="actions"><button type="button" id="gate-submit">Accept and continue</button></div>`,
-      `{ type: "acceptTickets", identity: text }`,
-      "accept-tickets",
-    );
-  }
   let report: ReturnType<typeof evaluateRelease> | null = null;
   try {
-    report = evaluateRelease(mission, (file) => fs.existsSync(file));
+    report = mission ? evaluateRelease(mission, (file) => fs.existsSync(file)) : null;
   } catch {
     report = null;
   }
-  const human = report?.criteria.find((item) => item.id === "human-release");
-  const automatedOpen = report?.criteria.filter((item) => item.id !== "human-release" && item.state !== "pass" && item.state !== "waived") ?? [];
-  // While the autopilot runs, offering to continue it would only start a second run.
-  if ((mission.loop === "blocked" || mission.loop === "draft") && !autopilotRunning()) {
-    const resume = humanGatePage(
-      nonce,
-      `<h2>Continue this mission</h2>
-      <p>Active mission <code>${escapeHtml(mission.id)}</code> · loop <strong>${escapeHtml(mission.loop)}</strong>.</p>
-      <div class="actions"><button type="button" id="gate-submit">Continue autopilot</button></div>`,
-      `{ type: "resumeAutopilot" }`,
-      "resume",
-    );
-    if (!open && (mission.tickets.length === 0 || mission.ticketTreeAccepted)) {
-      // Fall through to resume when no forge/accept form is showing.
-      if (!(human && human.state !== "pass" && human.state !== "waived" && automatedOpen.length === 0)) return resume;
-    }
-  }
-  if (human && human.state !== "pass" && human.state !== "waived" && automatedOpen.length === 0) {
-    return humanGatePage(
-      nonce,
-      `<h2>Release needs your approval</h2>
-      <p>Every automated gate passed for <code>${escapeHtml(mission.id)}</code>.</p>
-      <label for="gate-text">Your name</label>
-      <textarea id="gate-text" rows="2" placeholder="Name recorded with the approval"></textarea>
-      <label for="gate-reason">Why do you approve this release?</label>
-      <textarea id="gate-reason" rows="3" placeholder="Reason recorded with the approval"></textarea>
-      <div class="actions"><button type="button" id="gate-submit">Approve release</button></div>`,
-      `{ type: "approveRelease", identity: text, reason: (document.getElementById("gate-reason") && document.getElementById("gate-reason").value || "").trim() }`,
-      "approve-release",
-    );
-  }
-  return "";
+  const running = autopilotRunning();
+  return {
+    mission: mission
+      ? { id: mission.id, title: mission.title, loop: mission.loop, phase: mission.phase, complexity: mission.complexity, mode: mission.mode, activity: running ? activity : null, running, createdAt: mission.createdAt }
+      : null,
+    gate: mission ? humanGate(mission, report, running) : null,
+    release: report ? { state: report.state, criteria: report.criteria.map((item) => ({ id: item.id, label: item.label, state: item.state, detail: item.detail })) } : null,
+    requirements: mission ? mission.requirements.map((item) => ({ id: item.id, title: item.title, status: item.status })) : [],
+    tickets: mission ? mission.tickets.map((item) => ({ ref: item.ref, title: item.title, risk: item.risk })) : [],
+    evidence: mission ? latestEvidence(mission) : [],
+    findings: mission ? mission.findings.filter((item) => item.status !== "resolved").map((item) => ({ code: item.code, message: item.message, severity: item.severity })) : [],
+    jarvis: jarvis?.snapshot() ?? null,
+    composer: { error: composer.error },
+    acceptor: globalState?.get<string>("bmad-next.acceptor") ?? "",
+    model: process.env.BMAD_MODEL ?? "",
+  };
 }
 
-function humanGatePage(nonce: string, body: string, payload: string, key: string): string {
-  return `<section class="bmad-composer" id="human-gate">${body}</section>
-<script nonce="${nonce}">
-  const vscodeGate = window.bmadVscode || acquireVsCodeApi();
-  const gateState = () => vscodeGate.getState() || {};
-  const saveGate = (patch) => vscodeGate.setState(Object.assign({}, gateState(), patch));
-  const gateKey = ${JSON.stringify(key)};
-  const gateText = document.getElementById("gate-text");
-  const gateReason = document.getElementById("gate-reason");
-  const gateSubmit = document.getElementById("gate-submit");
-  const gateFields = [gateText, gateReason].filter(Boolean);
-  // The page reloads whenever the mission changes; keep what the person typed into this gate and where they typed it.
-  const previous = gateState();
-  const draft = previous.gateDraft && previous.gateDraft.key === gateKey ? previous.gateDraft : null;
-  if (draft && gateText && draft.text) gateText.value = draft.text;
-  if (draft && gateReason && draft.reason) gateReason.value = draft.reason;
-  const keep = () => saveGate({ gateDraft: { key: gateKey, text: gateText ? gateText.value : "", reason: gateReason ? gateReason.value : "" } });
-  const focusField = (field) => { field.focus(); field.selectionStart = field.selectionEnd = field.value.length; window.bmadFocused = true; };
-  for (const field of gateFields) {
-    field.addEventListener("input", keep);
-    field.addEventListener("focus", () => saveGate({ gateFocus: field.id }));
-    field.addEventListener("blur", () => saveGate({ gateFocus: null }));
+/** The latest run of each check for each ticket: an attack that failed and then passed shows as passed. */
+function latestEvidence(mission: Mission): HomeState["evidence"] {
+  const latest = new Map<string, Mission["evidence"][number]>();
+  for (const item of mission.evidence) latest.set(`${item.kind}:${item.story_id ?? ""}`, item);
+  return [...latest.values()]
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+    .slice(0, 12)
+    .map((item) => ({ kind: item.kind, result: item.result, story: item.story_id ?? "", at: item.timestamp, artifact: item.artifact ?? "" }));
+}
+
+/** The one decision a person owes the mission right now, if any. */
+function humanGate(mission: Mission, report: ReturnType<typeof evaluateRelease> | null, running: boolean): HomeGate | null {
+  const forge = mission.forge;
+  const open = forge?.outcome === "active" ? forge.questions.find((question) => !forge.answered.includes(question.id)) : undefined;
+  if (open && forge) {
+    return { kind: "forge", key: `forge:${open.id}`, index: forge.answered.length + 1, total: forge.questions.length, prompt: open.prompt, why: open.why };
   }
-  if (previous.gateSeen !== gateKey) {
-    saveGate({ gateSeen: gateKey, gateFocus: null });
-    if (gateText) focusField(gateText);
-  } else {
-    const focused = gateFields.find((field) => field.id === previous.gateFocus);
-    if (focused) focusField(focused);
+  if (mission.tickets.length > 0 && !mission.ticketTreeAccepted) {
+    return { kind: "accept", key: `accept:${mission.id}`, tickets: mission.tickets.map((ticket) => ({ ref: ticket.ref, title: ticket.title })) };
   }
-  if (gateSubmit) {
-    gateSubmit.addEventListener("click", () => {
-      const text = gateText ? gateText.value.trim() : "continue";
-      if (gateText && !text) { gateText.focus(); return; }
-      if (gateReason && !gateReason.value.trim()) { gateReason.focus(); return; }
-      gateSubmit.disabled = true;
-      saveGate({ gateDraft: null, gateFocus: null });
-      vscodeGate.postMessage(${payload});
-    });
-    if (gateText) {
-      gateText.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); gateSubmit.click(); }
-      });
-    }
+  const human = report?.criteria.find((item) => item.id === "human-release");
+  const automatedOpen = report?.criteria.filter((item) => item.id !== "human-release" && item.state !== "pass" && item.state !== "waived") ?? [];
+  if (human && human.state !== "pass" && human.state !== "waived" && automatedOpen.length === 0) return { kind: "approve", key: `approve:${mission.id}` };
+  // While the autopilot runs, offering to continue it would only start a second run.
+  if ((mission.loop === "blocked" || mission.loop === "draft" || stoppedByPerson(mission)) && !running && mission.loop !== "released") {
+    return { kind: "resume", key: `resume:${mission.id}:${mission.loop}`, reason: lastStopReason(mission) };
   }
-</script>`;
+  return null;
+}
+
+/** True when the autopilot's last run ended because a person pressed Stop. */
+function stoppedByPerson(mission: Mission): boolean {
+  try {
+    const last = requirePlane().events(mission.id).filter((event) => event.type === "AutopilotStopped" || event.type === "AutopilotStarted").at(-1);
+    return last?.type === "AutopilotStopped" && last.data?.byPerson === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Why the autopilot last stopped, in its own words, so the person knows what "continue" will retry. */
+function lastStopReason(mission: Mission): string {
+  try {
+    const stopped = requirePlane().events(mission.id).filter((event) => event.type === "AutopilotStopped").at(-1);
+    const reason = stopped?.data?.reason;
+    return typeof reason === "string" ? reason : "";
+  } catch {
+    return "";
+  }
 }
 
 function requirePlane(): BmadControlPlane {
@@ -420,45 +302,29 @@ function requirePlane(): BmadControlPlane {
 }
 
 async function newMission(diagnostics: vscode.DiagnosticCollection): Promise<void> {
-  // The composer lives in the Mission view; reveal it and focus the idea box.
-  composer.focus = true;
+  // The composer lives in the BMAD page; reveal it and put the cursor in it, ready for an idea.
   try {
-    await vscode.commands.executeCommand("bmad-next.missionControl.focus");
+    await vscode.commands.executeCommand("bmad-next.home.focus");
+    home?.show("new");
+    return;
   } catch {
     // Fall through to the input box below.
   }
-  if (missionWebview) {
-    if (composer.focus) paintMission(missionWebview);
-    void missionWebview.postMessage({ type: "focus" });
-    return;
-  }
-  composer.focus = false;
-  const idea = await vscode.window.showInputBox({ prompt: "Mission idea", placeHolder: IDEA_PLACEHOLDER, value: composer.draft, ignoreFocusOut: true });
+  const idea = await vscode.window.showInputBox({ prompt: "Mission idea", placeHolder: IDEA_PLACEHOLDER, ignoreFocusOut: true });
   if (idea === undefined) return;
   submitMission(idea, diagnostics);
 }
 
 function submitMission(text: string, diagnostics: vscode.DiagnosticCollection): void {
-  let mission: Mission;
   try {
-    mission = requirePlane().createMission(text);
+    requirePlane().createMission(text);
   } catch (error) {
-    composer.error = message(error);
-    composer.draft = text;
+    composer.error = `The mission was not created. ${message(error)}`;
     refresh(diagnostics);
-    void vscode.window.showErrorMessage(`BMAD: mission not created. ${composer.error}`);
     return;
   }
   composer.error = null;
-  composer.draft = "";
   refresh(diagnostics);
-  let next = "";
-  try {
-    next = ` Next: ${requirePlane().recommend(mission.id).skillId}`;
-  } catch (error) {
-    next = ` Next step unavailable: ${message(error)}`;
-  }
-  void vscode.window.showInformationMessage(`Mission ${mission.id} created (${mission.complexity}, loop ${mission.loop}).${next}`);
   // From here the mission drives itself: forge questions, then every automated step, pausing only for people.
   void vscode.commands.executeCommand("bmad-next.autopilot");
 }
@@ -485,6 +351,7 @@ function submitTicketAcceptance(identity: string, diagnostics: vscode.Diagnostic
   try {
     const mission = requirePlane().mission();
     requirePlane().acceptTicketTree(mission.id, identity.trim());
+    void globalState?.update("bmad-next.acceptor", identity.trim());
     refresh(diagnostics);
     resumeAutopilot(true);
   } catch (error) {
@@ -497,6 +364,7 @@ function submitReleaseApproval(identity: string, reason: string, diagnostics: vs
   try {
     const mission = requirePlane().mission();
     requirePlane().approve(mission.id, "release", identity.trim(), reason.trim());
+    void globalState?.update("bmad-next.acceptor", identity.trim());
     refresh(diagnostics);
     // A waiting autopilot runs the release gate itself once it sees the approval.
     if (!autopilotRunning()) void vscode.commands.executeCommand("bmad-next.release");
@@ -590,72 +458,6 @@ function doctorMarkdown(): string {
     .join("\n");
 }
 
-function requirementItems(): vscode.TreeItem[] {
-  return list((mission) => mission.requirements.map((requirement) => item(`${requirement.id} ${requirement.status}`, requirement.title)));
-}
-
-function ticketItems(): vscode.TreeItem[] {
-  return list((mission) => mission.tickets.map((ticket) => item(ticket.ref, `${ticket.title} · ${ticket.risk}`)));
-}
-
-function evidenceItems(): vscode.TreeItem[] {
-  return list((mission) =>
-    mission.evidence.length
-      ? mission.evidence.map((record) => item(`${record.kind} ${record.result}`, record.artifact ?? "no artifact"))
-      : [item("No runs", "Evidence appears after a runner finishes.")],
-  );
-}
-
-function findingItems(): vscode.TreeItem[] {
-  return list((mission) =>
-    mission.findings.length
-      ? mission.findings.map((finding) => item(finding.code, finding.message))
-      : [item("No findings", "Drift and gaps appear after a cross-check.")],
-  );
-}
-
-function agentItems(): vscode.TreeItem[] {
-  const fallback = (plane?.config().defaultRuntime ?? process.env.BMAD_RUNTIME ?? "").trim();
-  return list((mission) =>
-    mission.agents.map((agent) => item(agent.name, `${agent.role} · runtime ${agent.runtime ?? (fallback ? `${fallback} (default)` : "not configured")}`)),
-  );
-}
-
-function releaseItems(): vscode.TreeItem[] {
-  return list((mission) => {
-    const report = evaluateRelease(mission, (file) => fs.existsSync(file));
-    return [
-      item(gateLabel(report), "Release passes only from recorded evidence."),
-      ...report.criteria.map((criterion) => item(criterion.label, `${criterionLabel(criterion)}: ${criterion.detail}`)),
-    ];
-  });
-}
-
-function brainItems(): vscode.TreeItem[] {
-  return list((mission) => {
-    const counts = Object.entries(mission.brain).map(([topic, entries]) => item(topic, `${Array.isArray(entries) ? entries.length : 0} entries`));
-    return counts.length ? counts : [item("Empty", "Memory is written from recorded events.")];
-  });
-}
-
-function list(map: (mission: Mission) => vscode.TreeItem[]): vscode.TreeItem[] {
-  if (!plane) return [item("No workspace", "Open a folder.")];
-  try {
-    return map(plane.mission());
-  } catch {
-    const start = item("No mission", "Click to describe your project idea.");
-    start.command = { command: "bmad-next.mission", title: "BMAD: New Mission" };
-    return [start];
-  }
-}
-
-function item(label: string, detail: string): vscode.TreeItem {
-  const tree = new vscode.TreeItem(label);
-  tree.description = detail;
-  tree.tooltip = detail;
-  return tree;
-}
-
 function publishDiagnostics(diagnostics: vscode.DiagnosticCollection): void {
   diagnostics.clear();
   if (!plane) return;
@@ -728,14 +530,25 @@ function jarvisSettings(): JarvisSettings {
  */
 function registerJarvis(context: vscode.ExtensionContext, root: string, output: vscode.OutputChannel): void {
   const config = vscode.workspace.getConfiguration("bmadNext.jarvis");
-  const voiceInput = config.get<string>("voiceInput", "gemini");
+  const voiceInput = config.get<string>("voiceInput", "local");
+  const device = config.get<string>("microphoneDevice", ":0");
+  const local = localVoiceConfig();
+  const whisper = new WhisperService(local);
+  context.subscriptions.push({ dispose: () => whisper.dispose() });
+  const intent = voiceInput === "gemini" ? new GeminiIntentProvider() : voiceInput === "local" ? new LocalIntentProvider(local, whisper) : new TextCommandIntentProvider();
+  // Voice decisions are recorded under the person's own name, marked as spoken to Jarvis.
+  const speaker = () => {
+    const known = globalState?.get<string>("bmad-next.acceptor")?.trim();
+    if (known) return known;
+    const git = spawnSync("git", ["config", "user.name"], { cwd: root, encoding: "utf8" });
+    return String(git.stdout ?? "").trim() || "the workspace owner";
+  };
   const history = context.workspaceState.get<TranscriptEntry[]>("bmad-next.jarvis.transcript", []);
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.command = "bmad-next.jarvis.toggle";
   context.subscriptions.push(status);
   let saveTimer: NodeJS.Timeout | null = null;
   let logged = history.length;
-  const view = new JarvisView((action) => void onAction(action));
   const session = new JarvisSession(
     {
       root,
@@ -743,19 +556,45 @@ function registerJarvis(context: vscode.ExtensionContext, root: string, output: 
       autopilotRunning,
       startAutopilot: () => void vscode.commands.executeCommand("bmad-next.autopilot"),
       stopAutopilot: () => void vscode.commands.executeCommand("bmad-next.stopAutopilot"),
-      showEvidence: () => void vscode.commands.executeCommand("bmad-next.evidence.focus"),
+      showEvidence: () => void vscode.commands.executeCommand("bmad-next.home.focus").then(() => home?.reveal("evidence")),
+      acceptTickets: () => {
+        const mission = requirePlane().mission();
+        if (mission.tickets.length === 0) return "There is no ticket tree to accept yet.";
+        if (mission.ticketTreeAccepted) return "The ticket tree is already accepted.";
+        const name = speaker();
+        requirePlane().acceptTicketTree(mission.id, `${name} (by voice through Jarvis)`);
+        pushHome();
+        if (!autopilotRunning()) void vscode.commands.executeCommand("bmad-next.autopilot");
+        return `Ticket tree accepted for ${name}. Building starts now.`;
+      },
+      approveRelease: (reason) => {
+        const mission = requirePlane().mission();
+        const report = evaluateRelease(mission, (file) => fs.existsSync(file));
+        const open = report.criteria.filter((item) => item.id !== "human-release" && item.state !== "pass" && item.state !== "waived");
+        if (open.length > 0) return `The release cannot be approved yet: ${open.map((item) => item.label).join(", ")} still open.`;
+        const name = speaker();
+        requirePlane().approve(mission.id, "release", `${name} (by voice through Jarvis)`, reason);
+        pushHome();
+        if (!autopilotRunning()) void vscode.commands.executeCommand("bmad-next.release");
+        return `Release approved for ${name}. Running the release gate.`;
+      },
     },
     {
-      input: voiceInput === "off" ? null : new FfmpegMicrophoneInput(config.get<string>("microphoneDevice", ":0")),
-      intent: voiceInput === "gemini" ? new GeminiIntentProvider() : new TextCommandIntentProvider(),
+      input: voiceInput === "off" ? null : new FfmpegMicrophoneInput(device),
+      intent,
       fallback: new TextCommandIntentProvider(),
       output: new SystemSpeechOutput(),
+      continuous: voiceInput === "local" ? new ContinuousMicrophone(device) : null,
+      transcriber: voiceInput === "local" ? whisper : null,
     },
     jarvisSettings(),
     (snapshot) => {
-      view.post(snapshot);
-      status.text = snapshot.state === "JARVIS_OFF" ? "$(zap) Jarvis" : snapshot.paused ? "$(debug-pause) Jarvis paused" : snapshot.state === "JARVIS_LISTENING" ? "$(record) Jarvis listening" : "$(circle-filled) Jarvis active";
-      status.tooltip = snapshot.state === "JARVIS_OFF" ? "Activate Jarvis Mode (Cmd+Shift+J)" : `Jarvis ${snapshot.state}. Click to exit.`;
+      pushHome();
+      const micOpen = snapshot.listen.wakeWord || (snapshot.listen.handsFree && snapshot.state !== "JARVIS_OFF");
+      status.text = snapshot.state === "JARVIS_OFF"
+        ? snapshot.listen.wakeWord ? "$(record) Hey Jarvis" : "$(zap) Jarvis"
+        : snapshot.paused ? "$(debug-pause) Jarvis paused" : snapshot.state === "JARVIS_LISTENING" || snapshot.listen.hearing ? "$(record) Jarvis hearing" : micOpen ? "$(record) Jarvis listening" : "$(circle-filled) Jarvis active";
+      status.tooltip = micOpen ? "The microphone is open for Jarvis. Turn hands-free or Hey Jarvis off in the BMAD panel to close it." : snapshot.state === "JARVIS_OFF" ? "Activate Jarvis Mode (Cmd+Shift+J)" : `Jarvis ${snapshot.state}. Click to exit.`;
       status.show();
       // Mirror the conversation into the BMAD Next output channel, so commands and replies stay auditable.
       const entries = session.history;
@@ -778,36 +617,39 @@ function registerJarvis(context: vscode.ExtensionContext, root: string, output: 
   };
   const activate = async () => {
     output.appendLine(`[${new Date().toISOString()}] Jarvis Mode activating.`);
-    await vscode.commands.executeCommand("bmad-next.jarvis.focus");
+    await vscode.commands.executeCommand("bmad-next.home.focus");
     await session.activate();
     const snapshot = session.snapshot();
     output.appendLine(`[${new Date().toISOString()}] Jarvis ${snapshot.state}: ${snapshot.readiness.map((check) => `${check.ok ? "✓" : "⚠"} ${check.label} (${check.detail})`).join("; ")}`);
   };
-  async function onAction(action: JarvisAction): Promise<void> {
-    if (action.type === "activate") await activate();
-    else if (action.type === "exit") await confirmExit();
-    else if (action.type === "pause") session.pause();
-    else if (action.type === "resume") session.resume();
-    else if (action.type === "stopSpeaking") session.stopSpeaking();
-    else if (action.type === "pttStart") session.startListening();
-    else if (action.type === "pttStop") await session.stopListening();
-    else if (action.type === "text") await session.submitText(action.text);
-  }
-
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("bmad-next.jarvis", view, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.commands.registerCommand("bmad-next.jarvis.activate", activate),
     vscode.commands.registerCommand("bmad-next.jarvis.exit", confirmExit),
     vscode.commands.registerCommand("bmad-next.jarvis.toggle", () => (session.machine.state === "JARVIS_OFF" ? activate() : confirmExit())),
     vscode.commands.registerCommand("bmad-next.jarvis.pause", () => session.pause()),
     vscode.commands.registerCommand("bmad-next.jarvis.resume", () => session.resume()),
     vscode.commands.registerCommand("bmad-next.jarvis.stopSpeaking", () => session.stopSpeaking()),
+    // Push-to-talk from the page: recording lasts exactly as long as the button is held.
+    vscode.commands.registerCommand("bmad-next.jarvis.pttStart", () => session.startListening()),
+    vscode.commands.registerCommand("bmad-next.jarvis.pttStop", () => session.stopListening()),
+    vscode.commands.registerCommand("bmad-next.jarvis.handsFree", async () => {
+      const on = !session.snapshot().listen.handsFree;
+      if (on && session.machine.state === "JARVIS_OFF") await activate();
+      session.setListening({ handsFree: on });
+      void context.workspaceState.update("bmad-next.jarvis.handsFree", session.snapshot().listen.handsFree);
+    }),
+    vscode.commands.registerCommand("bmad-next.jarvis.wakeWord", () => {
+      session.setListening({ wakeWord: !session.snapshot().listen.wakeWord });
+      void context.workspaceState.update("bmad-next.jarvis.wakeWord", session.snapshot().listen.wakeWord);
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("bmadNext.jarvis")) session.configure(jarvisSettings());
     }),
-    { dispose: () => session.deactivate() },
+    { dispose: () => session.dispose() },
   );
-  view.post(session.snapshot());
+  // Wake-word listening survives a window reload when the person left it on; hands-free needs Jarvis on first.
+  if (context.workspaceState.get<boolean>("bmad-next.jarvis.wakeWord", false)) session.setListening({ wakeWord: true });
+  pushHome();
   status.text = "$(zap) Jarvis";
   status.tooltip = "Activate Jarvis Mode (Cmd+Shift+J)";
   status.show();

@@ -38,7 +38,7 @@ import { authorizeAgent, decideCommand } from "./policy";
 import { coverage, detectEdgeCaseTests, failingTestSummary, evaluateRelease, fileExists, missionEvidenceKinds, requirementKinds, partitionEvidence, proofFor, releaseMatrix, requiredEvidenceKinds, assertPassEvidence, requirementVerified, testCommandRanTests } from "./quality";
 import { parseIntent, type Intent } from "./intent";
 import { processRunner } from "./runner";
-import { acquireAutopilotLock, activeMissionId, appendEvent, ensureHome, listMissionIds, loadMission, readConfig, readEvents, releaseAutopilotLock, saveMission, writeConfig } from "./store";
+import { acquireAutopilotLock, activeMissionId, appendEvent, ensureHome, listMissionIds, loadMission, readConfig, readEvents, releaseAutopilotLock, saveMission, setActiveMission, writeConfig } from "./store";
 import { assertTomlHasNoStatus, renderTicketTree } from "./tickets";
 import type {
   AgentContract,
@@ -378,6 +378,15 @@ export class BmadControlPlane {
 
   listMissions(): string[] {
     return listMissionIds(this.root);
+  }
+
+  /** Switches the active mission to an existing one, for example from the mission history. */
+  openMission(missionId: string): Mission {
+    // The id names a folder; anything but a mission id could point outside the missions directory.
+    if (!/^msn_[A-Za-z0-9_-]+$/.test(missionId)) throw new Error(`${missionId} is not a mission id.`);
+    const mission = loadMission(this.root, missionId);
+    setActiveMission(this.root, mission.id);
+    return mission;
   }
 
   answerForge(missionId: string, text: string): Mission {
@@ -1355,6 +1364,16 @@ export class BmadControlPlane {
 
   pauseMission(missionId: string): Mission {
     return this.loops().pause(missionId);
+  }
+
+  /**
+   * A person stopped the autopilot in the middle of a step. The step's processes are already gone, so its lock goes
+   * too, and the stop is recorded; continuing retries the step that was running.
+   */
+  recordAutopilotAbort(missionId: string, reason: string): void {
+    const mission = this.must(missionId);
+    releaseAutopilotLock(this.root, missionId);
+    this.emit(mission, "AutopilotStopped", { status: "stopped", reason, byPerson: true });
   }
 
   cancelMission(missionId: string): Mission {

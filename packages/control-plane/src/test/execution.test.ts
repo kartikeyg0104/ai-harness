@@ -659,3 +659,26 @@ test("a run cut short by one malformed tool call continues its session instead o
   assert.match(calls[1]?.at(-1) ?? "", /malformed and rejected/);
   assert.equal(run.status, "completed");
 });
+
+test("stop ends the command a run is waiting on, with what it started, and the run returns at once", async () => {
+  const { Worker } = await import("node:worker_threads");
+  const { stopRunningSteps } = await import("../runner");
+  const runner = require.resolve("../runner");
+  // The run blocks its thread, as the control plane's worker does; Stop comes from the other thread.
+  const worker = new Worker(
+    `const { parentPort } = require("node:worker_threads");
+     const { processRunner } = require(${JSON.stringify(runner)});
+     const started = Date.now();
+     const result = processRunner.run("/bin/sh", ["-c", "sleep 30 & wait"], process.cwd(), 60000);
+     parentPort.postMessage({ ms: Date.now() - started, exitCode: result.exitCode });`,
+    { eval: true },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const ended = stopRunningSteps();
+  const reply = await new Promise<{ ms: number; exitCode: number | null }>((resolve) => worker.once("message", resolve));
+  await worker.terminate();
+  assert.ok(ended >= 2, `the shell and its sleep are both signalled (${ended})`);
+  assert.ok(reply.ms < 5000, `the run returned in ${reply.ms} ms`);
+  assert.notEqual(reply.exitCode, 0);
+  assert.equal(stopRunningSteps(), 0);
+});
